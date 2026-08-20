@@ -1,0 +1,32 @@
+[tool.black]
+line-length = 88
+target-version = ["py311"]  # match your Python version
+include = '\.pyi?$'
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+# Exclude common data/notebook clutter
+exclude = [
+    ".venv",
+    "venv",
+    "__pycache__",
+    "*.ipynb_checkpoints",
+]
+
+[tool.ruff.lint]
+# E/W = pycodestyle, F = pyflakes, I = isort (import sorting),
+# UP = pyupgrade, B = bugbear (catches subtle bugs), C4 = comprehensions,
+# PD = pandas-specific checks
+select = ["E", "W", "F", "I", "UP", "B", "C4", "PD"]
+
+# E501 (line too long) is redundant since Black already enforces line length
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = []  # add your own package name here if applicable
+
+[tool.ruff.format]
+# Turn off Ruff's own formatter so it doesn't fight with Black
+# (you're using Black as the formatter, Ruff just for linting)

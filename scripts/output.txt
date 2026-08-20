@@ -1,0 +1,32 @@
+Pacers inserted, team_id: 1
+Pacers roster size: 18
+Inserted player_id 126: Kobe Brown (Active)
+Inserted player_id 127: Johnny Furphy (Active)
+Inserted player_id 128: Tyrese Haliburton (Active)
+Inserted player_id 129: Jay Huff (Active)
+Inserted player_id 130: Quenton Jackson (Active)
+Inserted player_id 131: T.J. McConnell (Active)
+Inserted player_id 132: Larry Nance Jr. (Active)
+Inserted player_id 133: Andrew Nembhard (Active)
+Inserted player_id 134: Aaron Nesmith (Active)
+Inserted player_id 135: Kelly Oubre Jr. (Active)
+Inserted player_id 136: Ben Sheppard (Active)
+Inserted player_id 137: Pascal Siakam (Active)
+Inserted player_id 138: Jalen Slawson (Active)
+Inserted player_id 139: Braden Smith (Active)
+Inserted player_id 140: Ethan Thompson (Active)
+Inserted player_id 141: Obi Toppin (Active)
+Inserted player_id 142: Jarace Walker (Active)
+Inserted player_id 143: Ivica Zubac (Active)
+Purdue inserted, team_id: 2
+Red Wings inserted, team_id: 3
+Colts inserted, team_id: 4
+Top-level keys: ['timestamp', 'status', 'season', 'athletes', 'coach', 'team']
+Athletes count: 6
+First group's keys: ['position', 'items']
+Group position label: offense
+Players in this group: 44
+First player's keys: ['id', 'uid', 'guid', 'alternateIds', 'firstName', 'lastName', 'fullName', 'displayName', 'shortName', 'weight', 'displayWeight', 'height', 'displayHeight', 'age', 'dateOfBirth', 'debutYear', 'links', 'birthPlace', 'college', 'slug', 'headshot', 'jersey', 'position', 'injuries', 'teams', 'contracts', 'experience', 'contract', 'status']
+Name: Mo Alie-Cox
+Position: {'id': '7', 'name': 'Tight End', 'displayName': 'Tight End', 'abbreviation': 'TE', 'leaf': True, 'parent': {'id': '70', 'name': 'Offense', 'displayName': 'Offense', 'abbreviation': 'OFF', 'leaf': False}}
+Jersey: 81
