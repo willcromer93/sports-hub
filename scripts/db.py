@@ -58,6 +58,7 @@ def insert_player(
     status=None,
     college=None,
     headshot_url=None,
+    shoots_catches=None,
     contract_salary=None,
     contract_season=None,
     contract_total_value=None,
@@ -81,11 +82,12 @@ def insert_player(
                 height_inches, weight_lbs, jersey_number,
                 birth_date, birth_city, birth_state, birth_country,
                 experience_years, status, college, headshot_url,
+                shoots_catches,
                 contract_salary, contract_season,
                 contract_total_value, contract_years, contract_expires,
                 injury_status, draft_year, draft_round, draft_pick
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (league, external_id)
             DO UPDATE SET
                 name = EXCLUDED.name,
@@ -102,6 +104,7 @@ def insert_player(
                 status = EXCLUDED.status,
                 college = EXCLUDED.college,
                 headshot_url = EXCLUDED.headshot_url,
+                shoots_catches = EXCLUDED.shoots_catches,
                 contract_salary = EXCLUDED.contract_salary,
                 contract_season = EXCLUDED.contract_season,
                 contract_total_value = EXCLUDED.contract_total_value,
@@ -131,6 +134,7 @@ def insert_player(
                 status,
                 college,
                 headshot_url,
+                shoots_catches,
                 contract_salary,
                 contract_season,
                 contract_total_value,

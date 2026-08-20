@@ -122,11 +122,111 @@ purdue = [t for t in teams if t["college"] == "Purdue"][0]
 purdue_id = insert_team(conn, "NCAAB", str(purdue["id"]), purdue["full_name"])
 print("Purdue inserted, team_id:", purdue_id)
 
+# --- Purdue players (ESPN) ---
+response = requests.get(
+    "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/teams/2509/roster"
+)
+roster_data = response.json()
+athletes = roster_data["athletes"]
+print("Purdue roster size:", len(athletes))
+
+for a in athletes:
+    birth_place = a.get("birthPlace", {})
+    (
+        college,
+        headshot_url,
+        shoots_catches,
+        contract_salary,
+        contract_season,
+        contract_total_value,
+        contract_years,
+        contract_expires,
+        injury_status,
+    ) = extract_espn_fields(a)
+    player_id = insert_player(
+        conn,
+        purdue_id,
+        "NCAAB",
+        a["id"],
+        a["fullName"],
+        a["position"]["abbreviation"],
+        height_inches=a.get("height"),
+        weight_lbs=a.get("weight"),
+        jersey_number=a.get("jersey"),
+        birth_date=a.get("dateOfBirth", "").split("T")[0] or None,
+        birth_city=birth_place.get("city"),
+        birth_state=birth_place.get("state"),
+        birth_country=birth_place.get("country"),
+        experience_years=a.get("experience", {}).get("years"),
+        status=a.get("status", {}).get("name"),
+        college=college,
+        headshot_url=headshot_url,
+        shoots_catches=shoots_catches,
+        contract_salary=contract_salary,
+        contract_season=contract_season,
+        contract_total_value=contract_total_value,
+        contract_years=contract_years,
+        contract_expires=contract_expires,
+        injury_status=injury_status,
+    )
+    print(f"Inserted player_id {player_id}: {a['fullName']}")
+
 # --- Red Wings (NHL) ---
 response = requests.get("https://api-web.nhle.com/v1/club-schedule/DET/week/now")
 red_wings_data = response.json()
 red_wings_id = insert_team(conn, "NHL", "DET", "Detroit Red Wings")
 print("Red Wings inserted, team_id:", red_wings_id)
+
+# --- Red Wings players (ESPN) ---
+response = requests.get(
+    "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/teams/5/roster"
+)
+roster_data = response.json()
+groups = roster_data["athletes"]
+print("Number of position groups:", len(groups))
+
+for group in groups:
+    print(f"Group: {group['position']} ({len(group['items'])} players)")
+    for a in group["items"]:
+        birth_place = a.get("birthPlace", {})
+        (
+            college,
+            headshot_url,
+            shoots_catches,
+            contract_salary,
+            contract_season,
+            contract_total_value,
+            contract_years,
+            contract_expires,
+            injury_status,
+        ) = extract_espn_fields(a)
+        player_id = insert_player(
+            conn,
+            red_wings_id,
+            "NHL",
+            a["id"],
+            a["fullName"],
+            a["position"]["abbreviation"],
+            height_inches=a.get("height"),
+            weight_lbs=a.get("weight"),
+            jersey_number=a.get("jersey"),
+            birth_date=a.get("dateOfBirth", "").split("T")[0] or None,
+            birth_city=birth_place.get("city"),
+            birth_state=birth_place.get("state"),
+            birth_country=birth_place.get("country"),
+            experience_years=a.get("experience", {}).get("years"),
+            status=a.get("status", {}).get("name"),
+            college=college,
+            headshot_url=headshot_url,
+            shoots_catches=shoots_catches,
+            contract_salary=contract_salary,
+            contract_season=contract_season,
+            contract_total_value=contract_total_value,
+            contract_years=contract_years,
+            contract_expires=contract_expires,
+            injury_status=injury_status,
+        )
+        print(f"  Inserted player_id {player_id}: {a['fullName']}")
 
 # --- Colts (NFL) ---
 response = requests.get(
