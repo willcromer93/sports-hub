@@ -57,12 +57,46 @@ def extract_espn_fields(a):
     )
 
 
+def extract_team_venue_fields(team_data):
+    """Pull venue name and city out of an ESPN team dict.
+    Nesting may vary by sport - falls back to None instead of erroring
+    if a level of the structure isn't present."""
+    franchise = team_data.get("franchise", {})
+    venue_info = franchise.get("venue", team_data.get("venue", {}))
+    venue = venue_info.get("fullName")
+    city = venue_info.get("address", {}).get("city")
+    return venue, city
+
+
 # --- Pacers (NBA) ---
 response = requests.get("https://api.balldontlie.io/nba/v1/teams", headers=headers)
 teams = response.json()["data"]
 pacers = [t for t in teams if t["full_name"] == "Indiana Pacers"][0]
-pacers_id = insert_team(conn, "NBA", str(pacers["id"]), pacers["full_name"])
-print("Pacers inserted, team_id:", pacers_id)
+
+# Extra ESPN call just for venue/city enrichment
+response = requests.get(
+    "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/11"
+)
+pacers_team_data = response.json()["team"]
+pacers_venue, pacers_city = extract_team_venue_fields(pacers_team_data)
+
+pacers_id = insert_team(
+    conn,
+    "NBA",
+    str(pacers["id"]),
+    pacers["full_name"],
+    venue=pacers_venue,
+    city=pacers_city,
+    founded_year=1967,
+)
+print(
+    "Pacers inserted, team_id:",
+    pacers_id,
+    "| venue:",
+    pacers_venue,
+    "| city:",
+    pacers_city,
+)
 
 # --- Pacers players (ESPN) ---
 response = requests.get(
@@ -119,8 +153,24 @@ for a in athletes:
 response = requests.get("https://api.balldontlie.io/ncaab/v1/teams", headers=headers)
 teams = response.json()["data"]
 purdue = [t for t in teams if t["college"] == "Purdue"][0]
-purdue_id = insert_team(conn, "NCAAB", str(purdue["id"]), purdue["full_name"])
-print("Purdue inserted, team_id:", purdue_id)
+
+# ESPN's college basketball team endpoint doesn't return venue data,
+# unlike NBA/NHL/NFL - hardcoded instead, same as founded_year
+purdue_id = insert_team(
+    conn,
+    "NCAAB",
+    str(purdue["id"]),
+    purdue["full_name"],
+    venue="Mackey Arena",
+    city="West Lafayette",
+    founded_year=1896,  # first season of Purdue men's basketball
+)
+print(
+    "Purdue inserted, team_id:",
+    purdue_id,
+    "| venue: Mackey Arena",
+    "| city: West Lafayette",
+)
 
 # --- Purdue players (ESPN) ---
 response = requests.get(
@@ -174,8 +224,31 @@ for a in athletes:
 # --- Red Wings (NHL) ---
 response = requests.get("https://api-web.nhle.com/v1/club-schedule/DET/week/now")
 red_wings_data = response.json()
-red_wings_id = insert_team(conn, "NHL", "DET", "Detroit Red Wings")
-print("Red Wings inserted, team_id:", red_wings_id)
+
+# Extra ESPN call just for venue/city enrichment
+response = requests.get(
+    "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/teams/5"
+)
+red_wings_team_data = response.json()["team"]
+red_wings_venue, red_wings_city = extract_team_venue_fields(red_wings_team_data)
+
+red_wings_id = insert_team(
+    conn,
+    "NHL",
+    "DET",
+    "Detroit Red Wings",
+    venue=red_wings_venue,
+    city=red_wings_city,
+    founded_year=1926,
+)
+print(
+    "Red Wings inserted, team_id:",
+    red_wings_id,
+    "| venue:",
+    red_wings_venue,
+    "| city:",
+    red_wings_city,
+)
 
 # --- Red Wings players (ESPN) ---
 response = requests.get(
@@ -233,8 +306,20 @@ response = requests.get(
     "https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/ind"
 )
 team_data = response.json()["team"]
-colts_id = insert_team(conn, "NFL", team_data["id"], team_data["displayName"])
-print("Colts inserted, team_id:", colts_id)
+colts_venue, colts_city = extract_team_venue_fields(team_data)
+
+colts_id = insert_team(
+    conn,
+    "NFL",
+    team_data["id"],
+    team_data["displayName"],
+    venue=colts_venue,
+    city=colts_city,
+    founded_year=1984,
+)
+print(
+    "Colts inserted, team_id:", colts_id, "| venue:", colts_venue, "| city:", colts_city
+)
 
 # --- Colts players (ESPN) ---
 response = requests.get(

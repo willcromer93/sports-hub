@@ -41,8 +41,8 @@ This file exists so that any Claude conversation about this project starts with 
   ```
 - **Database:** PostgreSQL (Postgres.app on macOS), database name `sports_hub`, connected via SQLTools in VS Code. Full 7-table schema applied — see `SCHEMA.md` for table layout and reasoning.
 - **Tools already set up:** Python, Pylance, Black (formatter), Ruff (linter), SQLTools + Postgres driver, python-dotenv for API keys.
-- **APIs in use so far:** balldontlie.io (NBA/NCAAB, needs API key), NHL public API, ESPN public API.
-
+- **APIs in use:**
+  - **ESPN hidden API** (`site.api.espn.com`) — used for Colts team info, and now the primary source for *all* player roster data (Pacers, Purdue, Red Wings, Colts — all four teams complete as of 2026-08-29).
 ## A standing ask
 
 Since the goal is for me to learn, please:
@@ -68,3 +68,31 @@ Since the goal is for me to learn, please:
 **Next up:** install `psycopg2-binary`, add DB connection details to `.env`, write
 `insert_team()` and wire it into `scripts/api_pulls.py`, starting with the `teams` table
 (no dependencies on other tables, good first target).
+
+
+### 2026-08-29
+- Verified current database state directly via SQLTools rather than trusting these notes, since the file had drifted out of sync with reality. Query used:
+```sql
+  SELECT t.name AS team_name, t.league, COUNT(p.player_id) AS player_count
+  FROM teams t
+  LEFT JOIN players p ON p.team_id = t.team_id
+  GROUP BY t.name, t.league
+  ORDER BY t.league;
+```
+- **Confirmed all four player pulls are complete and working:**
+  - Indiana Pacers (NBA): 18 players
+  - Purdue Boilermakers (NCAAB): 12 players
+  - Indianapolis Colts (NFL): 98 players
+  - Detroit Red Wings (NHL): 32 players
+- **Confirmed several previously-open bugs are already resolved** (not caught in notes at the time they were fixed):
+  - `shoots_catches` column exists on `players` and is populated correctly (`L`/`R`) for Red Wings players.
+  - `injury_status` is storing clean status text (e.g. `Out`, `NULL`) — the earlier issue of it storing a raw stringified dict is fixed.
+  - `colts_id` NameError no longer applies — Colts are inserting fine (98 players).
+  - `position` column holds sensible free-text values across sports (confirmed hockey codes like `C`, `LW` alongside NBA/NFL positions).
+- **Lesson learned:** these notes can drift out of sync with the actual database state when work happens across sessions without a note update at the end. Going forward, when picking back up after a gap, verify current state directly against the database (via `information_schema.columns` for schema, `COUNT()` queries for row counts) rather than trusting the notes as ground truth.
+- Also confirmed real table structure while debugging the above: `teams` primary key is `team_id` (not `id`), `players` primary key is `player_id` — worth remembering for future joins.
+
+**Next up:**
+- Refresh `SCHEMA.md` — confirm it matches the current `players` table (it was already known to be behind as of the last entry).
+- Team-level enrichment (venue, city, capacity, founded year) — still not started.
+- Move to Phase 2: `games` table population, then eventually the Streamlit dashboard.

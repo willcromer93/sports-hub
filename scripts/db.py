@@ -17,23 +17,38 @@ def get_connection():
     )
 
 
-def insert_team(conn, league, external_id, name):
+def insert_team(
+    conn,
+    league,
+    external_id,
+    name,
+    venue=None,
+    city=None,
+    capacity=None,
+    founded_year=None,
+):
     """
     Insert a team into the teams table.
     If a team with the same (league, external_id) already exists,
-    update its name and updated_at timestamp instead of erroring out.
+    update its enrichment fields and updated_at timestamp instead of erroring out.
     Returns the team_id.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO teams (league, external_id, name)
-            VALUES (%s, %s, %s)
+            INSERT INTO teams (league, external_id, name, venue, city, capacity, founded_year)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (league, external_id)
-            DO UPDATE SET name = EXCLUDED.name, updated_at = now()
+            DO UPDATE SET
+                name = EXCLUDED.name,
+                venue = EXCLUDED.venue,
+                city = EXCLUDED.city,
+                capacity = EXCLUDED.capacity,
+                founded_year = EXCLUDED.founded_year,
+                updated_at = now()
             RETURNING team_id;
             """,
-            (league, external_id, name),
+            (league, external_id, name, venue, city, capacity, founded_year),
         )
         team_id = cur.fetchone()[0]
     conn.commit()
