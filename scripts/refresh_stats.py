@@ -69,7 +69,7 @@ print(f"Checking {len(games)} final games from the last {LOOKBACK_DAYS} days")
 periods_updated = 0
 box_scores_updated = 0
 unchanged = 0
-for game_id, league, external_id, regulation_periods, team_id, espn_id in games:
+for game_id, league, external_id, regulation_periods, sides in games:
     summary = fetch_summary(league, external_id)
     game_changed = False
 
@@ -86,21 +86,26 @@ for game_id, league, external_id, regulation_periods, team_id, espn_id in games:
         print(f"    was: {sorted(stored_periods)}")
         print(f"    now: {sorted(fresh_periods)}")
 
-    # --- Box score ---
-    fresh_box = parse_team_box_score(summary, espn_id, league)
-    if fresh_box:
-        changes = describe_box_score_changes(get_box_score(conn, game_id), fresh_box)
+    # --- Box scores: each team's side is compared and rewritten on its own ---
+    for team_id, espn_id in sides:
+        fresh_box = parse_team_box_score(summary, espn_id, league)
+        if not fresh_box:
+            continue
+        stored_box = get_box_score(conn, game_id, team_id)
+        changes = describe_box_score_changes(stored_box, fresh_box)
         if changes:
             insert_box_score(
                 conn,
                 game_id,
+                team_id,
                 box_score_rows(conn, team_id, league, fresh_box),
                 replace=True,
             )
             box_scores_updated += 1
             game_changed = True
             print(
-                f"{league} game {external_id}: box score updated ({len(changes)} changes)"
+                f"{league} game {external_id}, team {team_id}: "
+                f"box score updated ({len(changes)} changes)"
             )
             for change in changes[:MAX_CHANGES_SHOWN]:
                 print(f"    {change}")
@@ -117,6 +122,6 @@ if box_scores_updated:
 
 print(
     f"Done: {periods_updated} games had period score changes, "
-    f"{box_scores_updated} had box score changes, {unchanged} unchanged"
+    f"{box_scores_updated} box score sides changed, {unchanged} games unchanged"
 )
 conn.close()

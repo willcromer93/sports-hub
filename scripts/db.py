@@ -314,23 +314,25 @@ def insert_game_periods(conn, game_id, periods, replace=False):
 
 def get_games_missing_box_scores(conn):
     """
-    Find final games that don't have any player_game_appearances rows yet.
+    Find each side of a final game that doesn't have a box score yet — both
+    our team and the opponent, checked separately, so a game where only one
+    side was stored (e.g. games loaded before opponents were kept) gets just
+    the missing side filled in.
     Returns a list of (game_id, league, external_id, team_id, espn_id) tuples,
-    where team_id/espn_id are for the tracked team that played in the game.
+    one per missing side.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT g.game_id, g.league, g.external_id, t.team_id, t.espn_id
             FROM games g
-            JOIN teams t
-              ON t.team_id IN (g.home_team_id, g.away_team_id)
-             AND t.is_tracked
+            JOIN teams t ON t.team_id IN (g.home_team_id, g.away_team_id)
             WHERE g.status = 'final'
               AND NOT EXISTS (
-                  SELECT 1 FROM player_game_appearances a WHERE a.game_id = g.game_id
+                  SELECT 1 FROM player_game_appearances a
+                  WHERE a.game_id = g.game_id AND a.team_id = t.team_id
               )
-            ORDER BY g.game_time;
+            ORDER BY g.game_time, t.is_tracked DESC;
             """
         )
         return cur.fetchall()
@@ -377,35 +379,53 @@ def box_score_rows(conn, team_id, league, parsed):
     return rows
 
 
-def insert_box_score(conn, game_id, box_score, replace=False):
+def insert_box_score(conn, game_id, team_id, box_score, replace=False):
     """
-    Insert one game's box score for a team into player_game_appearances and
-    player_game_stats. `box_score` is a list of
+    Insert one team's side of a game's box score into player_game_appearances
+    and player_game_stats. `box_score` is a list of
     (player_id, did_play, seconds_played, stats), where stats is a dict of
-    {stat_name: stat_value}. Upserts both tables. With replace=True, the
-    game's existing rows are deleted first, so a stat or player ESPN has
-    since removed doesn't linger. Commits once at the end, so a game gets
-    either its whole box score or none of it.
+    {stat_name: stat_value}. Upserts both tables. With replace=True, that
+    team's existing rows for the game are deleted first (the other team's
+    side is left alone), so a stat or player ESPN has since removed doesn't
+    linger. Commits once at the end, so a side gets either its whole box
+    score or none of it.
     """
     with conn.cursor() as cur:
         if replace:
-            cur.execute("DELETE FROM player_game_stats WHERE game_id = %s;", (game_id,))
+            # Stats have no team_id of their own, so match them through the
+            # appearance rows for this team's side before those are deleted.
             cur.execute(
-                "DELETE FROM player_game_appearances WHERE game_id = %s;", (game_id,)
+                """
+                DELETE FROM player_game_stats s
+                USING player_game_appearances a
+                WHERE a.game_id = s.game_id
+                  AND a.player_id = s.player_id
+                  AND a.game_id = %s
+                  AND a.team_id = %s;
+                """,
+                (game_id, team_id),
+            )
+            cur.execute(
+                """
+                DELETE FROM player_game_appearances
+                WHERE game_id = %s AND team_id = %s;
+                """,
+                (game_id, team_id),
             )
         for player_id, did_play, seconds_played, stats in box_score:
             cur.execute(
                 """
                 INSERT INTO player_game_appearances (
-                    game_id, player_id, did_play, seconds_played
+                    game_id, player_id, team_id, did_play, seconds_played
                 )
-                VALUES (%s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (game_id, player_id)
                 DO UPDATE SET
+                    team_id = EXCLUDED.team_id,
                     did_play = EXCLUDED.did_play,
                     seconds_played = EXCLUDED.seconds_played;
                 """,
-                (game_id, player_id, did_play, seconds_played),
+                (game_id, player_id, team_id, did_play, seconds_played),
             )
             for stat_name, stat_value in stats.items():
                 cur.execute(
@@ -426,26 +446,32 @@ def get_recent_final_games(conn, days):
     """
     Final games played in the last `days` days — the ones the weekly refresh
     re-checks for ESPN stat corrections. Returns a list of
-    (game_id, league, external_id, regulation_periods, team_id, espn_id),
-    where team_id/espn_id are for the tracked team that played in the game.
+    (game_id, league, external_id, regulation_periods, sides), where sides is
+    [(team_id, espn_id), ...] for both teams — box scores are checked for
+    each side separately.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT g.game_id, g.league, g.external_id, l.regulation_periods,
-                   t.team_id, t.espn_id
+                   home.team_id, home.espn_id, away.team_id, away.espn_id
             FROM games g
             JOIN sport_period_labels l ON l.league = g.league
-            JOIN teams t
-              ON t.team_id IN (g.home_team_id, g.away_team_id)
-             AND t.is_tracked
+            JOIN teams home ON home.team_id = g.home_team_id
+            JOIN teams away ON away.team_id = g.away_team_id
             WHERE g.status = 'final'
               AND g.game_time >= now() - make_interval(days => %s)
             ORDER BY g.game_time;
             """,
             (days,),
         )
-        return cur.fetchall()
+        games = []
+        for row in cur.fetchall():
+            game_id, league, external_id, regulation_periods = row[:4]
+            home_id, home_espn_id, away_id, away_espn_id = row[4:]
+            sides = [(home_id, home_espn_id), (away_id, away_espn_id)]
+            games.append((game_id, league, external_id, regulation_periods, sides))
+        return games
 
 
 def get_game_periods(conn, game_id):
@@ -466,9 +492,9 @@ def get_game_periods(conn, game_id):
         return cur.fetchall()
 
 
-def get_box_score(conn, game_id):
+def get_box_score(conn, game_id, team_id):
     """
-    One game's stored box score, as
+    One team's side of a game's stored box score, as
     {espn_athlete_id: {"name", "did_play", "seconds_played", "stats"}} — the
     same shape espn.parse_team_box_score returns, so the two can be compared
     directly. Stat values come back from Postgres as Decimal, so they're
@@ -481,9 +507,9 @@ def get_box_score(conn, game_id):
             SELECT p.external_id, p.name, a.did_play, a.seconds_played
             FROM player_game_appearances a
             JOIN players p ON p.player_id = a.player_id
-            WHERE a.game_id = %s;
+            WHERE a.game_id = %s AND a.team_id = %s;
             """,
-            (game_id,),
+            (game_id, team_id),
         )
         for external_id, name, did_play, seconds_played in cur.fetchall():
             box_score[external_id] = {
@@ -497,10 +523,12 @@ def get_box_score(conn, game_id):
             """
             SELECT p.external_id, s.stat_name, s.stat_value
             FROM player_game_stats s
+            JOIN player_game_appearances a
+              ON a.game_id = s.game_id AND a.player_id = s.player_id
             JOIN players p ON p.player_id = s.player_id
-            WHERE s.game_id = %s;
+            WHERE s.game_id = %s AND a.team_id = %s;
             """,
-            (game_id,),
+            (game_id, team_id),
         )
         for external_id, stat_name, stat_value in cur.fetchall():
             box_score[external_id]["stats"][stat_name] = float(stat_value)
@@ -534,6 +562,11 @@ def rebuild_stat_rollups(conn):
     where he threw a pass). "Career" means every game in our database —
     our tracked teams since data collection began — not a player's full career.
 
+    Only our tracked teams' players are rolled up. Opponents' box scores are
+    stored too, but a total over "the games they happened to play against
+    us" isn't a real season or career line; the dashboard aggregates those
+    straight from player_game_stats instead.
+
     Returns (season_rows, career_rows).
     """
     params = {"non_additive": NON_ADDITIVE_STAT_PATTERN}
@@ -545,18 +578,18 @@ def rebuild_stat_rollups(conn):
                 player_id, team_id, season_year, season_type, stat_name,
                 games_played, total_value, avg_value, max_value
             )
-            SELECT s.player_id, t.team_id, g.season_year, g.season_type, s.stat_name,
+            SELECT s.player_id, a.team_id, g.season_year, g.season_type, s.stat_name,
                    COUNT(*), SUM(s.stat_value), AVG(s.stat_value), MAX(s.stat_value)
             FROM player_game_stats s
             JOIN games g ON g.game_id = s.game_id
-            -- The team the player played for is the tracked team in that
-            -- game (box scores only store our teams' players), not
-            -- players.team_id, which is their current team and can go stale.
-            JOIN teams t
-              ON t.team_id IN (g.home_team_id, g.away_team_id)
-             AND t.is_tracked
+            -- The team the player played for in that game comes from their
+            -- appearance row, not players.team_id (their current team,
+            -- which goes stale after a trade).
+            JOIN player_game_appearances a
+              ON a.game_id = s.game_id AND a.player_id = s.player_id
+            JOIN teams t ON t.team_id = a.team_id AND t.is_tracked
             WHERE {_ADDITIVE_STATS_ONLY}
-            GROUP BY s.player_id, t.team_id, g.season_year, g.season_type, s.stat_name;
+            GROUP BY s.player_id, a.team_id, g.season_year, g.season_type, s.stat_name;
             """,
             params,
         )
@@ -573,6 +606,9 @@ def rebuild_stat_rollups(conn):
                    COUNT(*), SUM(s.stat_value), AVG(s.stat_value), MAX(s.stat_value)
             FROM player_game_stats s
             JOIN games g ON g.game_id = s.game_id
+            JOIN player_game_appearances a
+              ON a.game_id = s.game_id AND a.player_id = s.player_id
+            JOIN teams t ON t.team_id = a.team_id AND t.is_tracked
             WHERE {_ADDITIVE_STATS_ONLY}
             GROUP BY s.player_id, g.season_type, s.stat_name;
             """,

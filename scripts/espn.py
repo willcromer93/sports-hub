@@ -23,6 +23,7 @@ def fetch_summary(league, event_id):
     response = requests.get(
         f"https://site.api.espn.com/apis/site/v2/sports/{SPORT_PATHS[league]}/summary",
         params={"event": event_id},
+        timeout=30,  # never hang forever if ESPN stops responding
     )
     return response.json()
 

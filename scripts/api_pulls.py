@@ -186,25 +186,24 @@ def pull_game_periods(conn):
 
 
 def pull_box_scores(conn):
-    """Fill in player_game_appearances and player_game_stats for our team in
-    every final game that doesn't have a box score yet, from ESPN's per-game
-    summary endpoint. Only the tracked team's players are stored — opponents'
-    players aren't in the players table. Returns the number of games filled in."""
+    """Fill in player_game_appearances and player_game_stats for both teams in
+    every final game, from ESPN's per-game summary endpoint. Each side (our
+    team, the opponent) is filled in separately, only if it's missing.
+    Opponent players who aren't in `players` yet get a minimal row.
+    Returns the number of sides filled in."""
     filled = 0
-    for (
-        game_id,
-        league,
-        external_id,
-        our_team_id,
-        our_espn_id,
-    ) in get_games_missing_box_scores(conn):
-        summary = fetch_summary(league, external_id)
-        parsed = parse_team_box_score(summary, our_espn_id, league)
+    summaries = {}  # both sides of a game come from the same ESPN response
+    for game_id, league, external_id, team_id, espn_id in get_games_missing_box_scores(
+        conn
+    ):
+        if game_id not in summaries:
+            summaries[game_id] = fetch_summary(league, external_id)
+        parsed = parse_team_box_score(summaries[game_id], espn_id, league)
         if not parsed:
-            print(f"  No box score for {league} game {external_id}, skipping")
+            print(f"  No box score for team {team_id} in {league} game {external_id}")
             continue
         insert_box_score(
-            conn, game_id, box_score_rows(conn, our_team_id, league, parsed)
+            conn, game_id, team_id, box_score_rows(conn, team_id, league, parsed)
         )
         filled += 1
 
@@ -538,7 +537,7 @@ print(f"Games with periods filled in: {periods_filled}")
 
 # --- Player box scores (ESPN per-game summaries) ---
 box_scores_filled = pull_box_scores(conn)
-print(f"Games with box scores filled in: {box_scores_filled}")
+print(f"Box score sides filled in (ours + opponents): {box_scores_filled}")
 
 # --- Season/career rollups (rebuilt from player_game_stats) ---
 season_rows, career_rows = rebuild_stat_rollups(conn)
