@@ -18,6 +18,7 @@ The Pi has not been re-verified since the 2026-08-30 migration.*
    to `player_game_appearances` and `player_game_stats`. Safe to rerun.
 3. `sql/teams_is_tracked.sql`: adds `espn_id`/`is_tracked` to `teams`, makes
    `external_id` nullable, and backfills the four tracked teams. Safe to rerun.
+4. `sql/games_season_type.sql`: adds `season_type` to `games`. Safe to rerun.
 
 ### teams
 One row per team, across all four leagues — our four tracked teams plus
@@ -84,7 +85,7 @@ Unique on (league, external_id).
 One row per game, stored home/away style — each game appears once, no
 matter which of our teams played in it (so Pacers vs. Pistons is one row, and
 a game between two tracked teams isn't duplicated). Populated nightly from
-ESPN's team schedule endpoint — **regular season only** for now.
+ESPN's team schedule endpoint — preseason, regular season, and postseason.
 
 `season_year` is ESPN's season year: the year the season *ends* for
 NBA/NHL/NCAAB (2026-27 → 2027), but the year it *starts* for the NFL (2026).
@@ -97,6 +98,7 @@ announced yet (common for Purdue) — there's no column to flag that yet.
 | league          | TEXT        |                                                            |
 | external_id     | TEXT        | source API's game ID                                       |
 | season_year     | INTEGER     |                                                            |
+| season_type     | TEXT        | must be preseason / regular / postseason; no default — every insert must set it |
 | home_team_id    | INTEGER FK  | references teams                                           |
 | away_team_id    | INTEGER FK  | references teams                                           |
 | game_time       | TIMESTAMPTZ | scheduled start, with time zone                            |
@@ -115,7 +117,15 @@ Both team columns reference `teams`; opponents get their row via
 
 ### game_periods
 One row per game per period — the box-score line (quarters, halves, periods,
-overtime, shootout).
+overtime, shootout). Filled in nightly for final games that don't have
+rows yet, from ESPN's per-game `summary` endpoint.
+
+Numbering restarts for each `period_type`: regulation 1..N, overtime 1..k,
+shootout 1. NBA double overtime is ('overtime', 1) + ('overtime', 2). ESPN
+lists periods in order without labeling them, so the type comes from the
+league's `regulation_periods` (in `sport_period_labels`) plus the game's
+`Final/SO` status for hockey shootouts. The shootout row holds the 1 goal
+credited to the winner, so a game's periods always sum to its final score.
 
 | Column        | Type       | Notes                                               |
 |---------------|------------|-----------------------------------------------------|
@@ -224,10 +234,9 @@ Unique on (player_id, team_id, season, stat_name) for season stats;
 - `draft_year`/`draft_round`/`draft_pick` always NULL — would need a
   different ESPN endpoint to populate.
 - `teams.capacity` intentionally unpopulated.
-- `games` holds regular-season games only. There's no `season_type`
-  column, so preseason/postseason would be indistinguishable if loaded.
 - `games.game_time` can't tell "time TBD" apart from a real start time.
-- `game_periods` and all player game/season/career stat tables exist but
-  have no data yet (per-period scores need ESPN's per-game `summary` endpoint).
+- `game_periods` rows are written once per game and never refreshed (fine
+  unless ESPN corrects a score afterward).
+- All player game/season/career stat tables exist but have no data yet.
 - `sql/schema.sql` is currently a Markdown snapshot, not runnable SQL — the
   Phase 1 tables can't yet be rebuilt from the repo alone.
