@@ -22,13 +22,14 @@ def insert_team(
     league,
     external_id,
     name,
+    espn_id=None,
     venue=None,
     city=None,
     capacity=None,
     founded_year=None,
 ):
     """
-    Insert a team into the teams table.
+    Insert one of our tracked teams into the teams table.
     If a team with the same (league, external_id) already exists,
     update its enrichment fields and updated_at timestamp instead of erroring out.
     Returns the team_id.
@@ -36,11 +37,14 @@ def insert_team(
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO teams (league, external_id, name, venue, city, capacity, founded_year)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO teams (league, external_id, name, espn_id, is_tracked,
+                               venue, city, capacity, founded_year)
+            VALUES (%s, %s, %s, %s, true, %s, %s, %s, %s)
             ON CONFLICT (league, external_id)
             DO UPDATE SET
                 name = EXCLUDED.name,
+                espn_id = COALESCE(EXCLUDED.espn_id, teams.espn_id),
+                is_tracked = true,
                 venue = EXCLUDED.venue,
                 city = EXCLUDED.city,
                 capacity = EXCLUDED.capacity,
@@ -48,7 +52,33 @@ def insert_team(
                 updated_at = now()
             RETURNING team_id;
             """,
-            (league, external_id, name, venue, city, capacity, founded_year),
+            (league, external_id, name, espn_id, venue, city, capacity, founded_year),
+        )
+        team_id = cur.fetchone()[0]
+    conn.commit()
+    return team_id
+
+
+def upsert_opponent_team(conn, league, espn_id, name):
+    """
+    Insert an opponent team (one we don't track) into the teams table,
+    keyed on (league, espn_id). Used by the games pull so every game's
+    home/away team has a row to point at. Only touches name/updated_at,
+    so it never changes is_tracked, external_id, or venue fields.
+    Returns the team_id.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO teams (league, espn_id, name)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (league, espn_id)
+            DO UPDATE SET
+                name = EXCLUDED.name,
+                updated_at = now()
+            RETURNING team_id;
+            """,
+            (league, espn_id, name),
         )
         team_id = cur.fetchone()[0]
     conn.commit()

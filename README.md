@@ -17,10 +17,11 @@ SPORTS-HUB/
 ├── dashboard/ # Dashboard/visualization layer (not started yet — blocked on games table)
 ├── scripts/
 │ ├── api_pulls.py # Pulls team + player data from external sports APIs, upserts into Postgres
-│ └── db.py # Database connection + insert functions (get_connection, insert_team, insert_player)
+│ └── db.py # Database connection + insert functions (get_connection, insert_team, upsert_opponent_team, insert_player)
 ├── sql/
 │ ├── schema.sql # Phase 1 schema — currently a Markdown snapshot, not runnable SQL (to be replaced)
-│ └── phase2_games_schema.sql # Phase 2 DDL: games, game_periods, sport_period_labels (+ seeds), game_id FKs
+│ ├── phase2_games_schema.sql # Phase 2 DDL: games, game_periods, sport_period_labels (+ seeds), game_id FKs
+│ └── teams_is_tracked.sql # Adds espn_id + is_tracked to teams so opponents can be stored
 ├── venv/ # Python virtual environment (not tracked in git)
 ├── .env # API keys + DB credentials (not tracked in git)
 ├── Schema.md # Current database schema documentation (9 tables)
@@ -75,6 +76,7 @@ Requires a local Postgres instance (this project uses Postgres.app on macOS) wit
 
 ```bash
 psql -h localhost -d sports_hub -f sql/phase2_games_schema.sql
+psql -h localhost -d sports_hub -f sql/teams_is_tracked.sql
 ```
 
 ## Scripts
@@ -84,7 +86,8 @@ psql -h localhost -d sports_hub -f sql/phase2_games_schema.sql
 Holds the database connection and insert logic, using `psycopg2` directly (not an ORM like SQLAlchemy) to keep the underlying SQL explicit.
 
 - `get_connection()` — opens a connection to the `sports_hub` Postgres database using the credentials in `.env`.
-- `insert_team(conn, league, external_id, name, venue=None, city=None, capacity=None, founded_year=None)` — upserts a row into `teams`. Safe to call repeatedly; updates existing rows instead of erroring on duplicates. `capacity` exists as a column but is intentionally left unpopulated (ESPN doesn't return it reliably across sports).
+- `insert_team(conn, league, external_id, name, espn_id=None, venue=None, city=None, capacity=None, founded_year=None)` — upserts one of the four **tracked** teams into `teams` (keyed on `league` + `external_id`) and marks it `is_tracked = true`. Safe to call repeatedly; updates existing rows instead of erroring on duplicates. `capacity` exists as a column but is intentionally left unpopulated (ESPN doesn't return it reliably across sports).
+- `upsert_opponent_team(conn, league, espn_id, name)` — upserts an **opponent** team (keyed on `league` + `espn_id`) so games can reference it. Only updates name/timestamp, never tracked-team fields.
 - `insert_player(conn, team_id, league, external_id, name, position, ...)` — upserts a row into `players`, with a large set of optional enrichment fields (height, weight, jersey number, birth info, college, contract summary, injury status, headshot URL, draft info). Safe to call repeatedly.
 
 ### `scripts/api_pulls.py`

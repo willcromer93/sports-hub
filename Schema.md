@@ -16,15 +16,21 @@ The Pi has not been re-verified since the 2026-08-30 migration.*
 2. Phase 2 — `sql/phase2_games_schema.sql`: creates `games`, `game_periods`,
    `sport_period_labels` (with seed rows), then adds the `game_id` foreign keys
    to `player_game_appearances` and `player_game_stats`. Safe to rerun.
+3. `sql/teams_is_tracked.sql`: adds `espn_id`/`is_tracked` to `teams`, makes
+   `external_id` nullable, and backfills the four tracked teams. Safe to rerun.
 
 ### teams
-One row per team, across all four leagues.
+One row per team, across all four leagues — our four tracked teams plus
+every opponent they play (added by the games pull as schedules come in), so
+`games.home_team_id`/`away_team_id` always have a row to point at.
 
 | Column       | Type        | Notes                                                    |
 |--------------|-------------|----------------------------------------------------------|
 | team_id      | SERIAL PK   |                                                          |
 | league       | TEXT        | 'NBA', 'NCAAB', 'NHL', 'NFL'                             |
-| external_id  | TEXT        | ID from that team's source API — never change it (see README) |
+| external_id  | TEXT        | balldontlie/NHL/ESPN identity ID for tracked teams — never change it (see README); NULL for opponents |
+| espn_id      | TEXT        | ESPN team ID, used to match schedule/game data to a row. Not interchangeable with external_id — ESPN NBA 12 is the Clippers, but '12' is the Pacers' external_id |
+| is_tracked   | BOOLEAN     | true for our four teams, false (default) for opponents        |
 | name         | TEXT        |                                                          |
 | updated_at   | TIMESTAMPTZ | defaults to now(); refreshed on every upsert             |
 | venue        | TEXT        | ESPN for NBA/NHL/NFL; hardcoded for Purdue               |
@@ -32,7 +38,9 @@ One row per team, across all four leagues.
 | capacity     | INTEGER     | intentionally left NULL — candidate for `DROP COLUMN`    |
 | founded_year | INTEGER     | hardcoded for all four teams                             |
 
-Unique on (league, external_id).
+Unique on (league, external_id) and on (league, espn_id). NULLs don't count
+as duplicates in a UNIQUE constraint, so any number of opponents can have a
+NULL external_id. Columns added by `sql/teams_is_tracked.sql`.
 
 ### players
 One row per player, shared across all four sports rather than per-team or
@@ -96,9 +104,8 @@ a game between two tracked teams isn't duplicated). Not yet populated.
 Unique on (league, external_id). Check: `home_team_id <> away_team_id`.
 Indexes: only the two that come with the primary key and the unique constraint.
 
-**Open question:** both team columns must reference a row in `teams`, which
-currently only holds our four teams — so opponents will need to be added to
-`teams` (or the design adjusted) before games can be loaded.
+Both team columns reference `teams`; opponents get their row via
+`upsert_opponent_team()` in `db.py` (keyed on `espn_id`) before a game is inserted.
 
 ### game_periods
 One row per game per period — the box-score line (quarters, halves, periods,
