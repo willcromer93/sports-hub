@@ -3,6 +3,8 @@ Chart builders (Altair). Each function takes a DataFrame and returns a chart
 for st.altair_chart(). Colors are defined once here so every chart matches.
 """
 
+import math
+
 import altair as alt
 
 # One color for single-series charts; a blue/orange pair for win vs. loss
@@ -12,6 +14,17 @@ WIN = "#2a78d6"
 LOSS = "#eb6834"
 MUTED = "#8a8985"
 GRID = "#e6e5e1"
+
+
+def _whole_number_axis(values):
+    """
+    An axis with whole-number ticks only (no "0.5 goals"). The tick values
+    are listed explicitly — a tickMinStep setting gets lost when charts are
+    layered (e.g. bars + an average line).
+    """
+    top = max(1, math.ceil(max((v for v in values if v == v), default=1)))
+    step = max(1, math.ceil(top / 5))
+    return alt.Axis(values=list(range(0, top + step, step)), format="d")
 
 
 def _style(chart, height):
@@ -63,7 +76,7 @@ def game_log_chart(log, label, average, whole_numbers=False):
     One stat across a player's games, with a dashed line at their average.
     Expects columns: game_label, <label>, matchup, date.
     """
-    axis = alt.Axis(tickMinStep=1, format="d") if whole_numbers else alt.Axis()
+    axis = _whole_number_axis(log[label]) if whole_numbers else alt.Axis()
     bars = (
         alt.Chart(log)
         .mark_bar(cornerRadiusEnd=4, size=18, color=SERIES)
@@ -94,7 +107,7 @@ def leaders_chart(table, label, value_format=",.1f"):
     """
     # Whole-number stats (goals, yards) get whole-number axis ticks.
     whole_numbers = value_format.endswith("0f")
-    axis = alt.Axis(tickMinStep=1, format="d") if whole_numbers else alt.Axis()
+    axis = _whole_number_axis(table[label]) if whole_numbers else alt.Axis()
     base = alt.Chart(table).encode(
         y=alt.Y("Player:N", sort="-x", title=None),
         x=alt.X(f"{label}:Q", title=label, axis=axis),

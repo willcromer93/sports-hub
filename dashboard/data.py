@@ -5,7 +5,7 @@ Each function returns a pandas DataFrame (a table in memory). They're wrapped
 in @st.cache_data, which remembers a function's result for CACHE_SECONDS: the
 first page load runs the query, and every click after that reuses the answer
 instead of asking Postgres again. The data only changes nightly, so that's
-safe — and the sidebar's "Refresh data" button clears the cache on demand.
+safe — and the footer's "Refresh data" button clears the cache on demand.
 """
 
 import sys

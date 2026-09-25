@@ -37,11 +37,6 @@ all_games = pd.concat(all_games, ignore_index=True)
 now = pd.Timestamp.now(tz="UTC")
 
 
-def open_team(name):
-    st.session_state["team"] = name
-    st.switch_page("views/team.py")
-
-
 # --- Team cards -------------------------------------------------------------
 for col, name in zip(st.columns(len(team_names)), team_names, strict=True):
     league = teams.loc[name, "league"]
@@ -51,10 +46,15 @@ for col, name in zip(st.columns(len(team_names)), team_names, strict=True):
     meta = team_meta(name)
 
     with col.container(border=True):
-        logo, title = st.columns([1, 3], vertical_alignment="center")
-        logo.image(meta["logo"], width=48)
-        title.markdown(f"**{meta['short']}**")
-        title.caption(league)
+        # Logo and name in one flex row (HTML rather than st.columns, which
+        # would stack the logo above the name on a phone).
+        st.markdown(
+            f"<div style='display:flex;align-items:center;gap:.75rem'>"
+            f"<img src='{meta['logo']}' width='40' height='40' alt=''>"
+            f"<div><div style='font-weight:600'>{meta['short']}</div>"
+            f"<div style='font-size:.8rem;opacity:.6'>{league}</div></div></div>",
+            unsafe_allow_html=True,
+        )
 
         if finals.empty:
             season_year = games["season_year"].max()
@@ -84,14 +84,16 @@ for col, name in zip(st.columns(len(team_names)), team_names, strict=True):
                 f"**Next:** {matchup(nxt)} · {format_datetime(nxt['game_time'])}"
             )
 
-        st.button(
+        # Switch pages in the main script, not in an on_click callback:
+        # Streamlit ignores st.switch_page() inside callbacks.
+        if st.button(
             "Team page",
             key=f"open_{name}",
-            on_click=open_team,
-            args=(name,),
             icon=":material/arrow_forward:",
             width="stretch",
-        )
+        ):
+            st.session_state["team"] = name
+            st.switch_page("views/team.py")
 
 # --- Upcoming games and latest results ---------------------------------------
 # Fixed pixel widths for the narrow columns, so Game gets the leftover space.
@@ -113,7 +115,7 @@ upcoming = all_games[
 upcoming = upcoming.sort_values("game_time").head(UPCOMING_COUNT)
 upcoming["When"] = upcoming["game_time"].map(format_short_datetime)
 st.dataframe(
-    upcoming[["logo", "Team", "Game", "When", "Type"]],
+    upcoming[["logo", "Team", "When", "Game", "Type"]],
     column_config=table_columns,
     hide_index=True,
     width="stretch",
@@ -125,7 +127,7 @@ results = results.sort_values("game_time", ascending=False).head(RESULTS_COUNT)
 results["Date"] = results["game_time"].map(format_short_date)
 results["Result"] = results["result_label"]
 st.dataframe(
-    results[["logo", "Team", "Game", "Result", "Date", "Type"]],
+    results[["logo", "Team", "Result", "Game", "Date", "Type"]],
     column_config=table_columns,
     hide_index=True,
     width="stretch",

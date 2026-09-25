@@ -4,7 +4,7 @@ Sports Hub dashboard — entry point.
 Run from the project root:
     streamlit run dashboard/app.py
 
-This file sets up the page list and the sidebar filters (team, season,
+This file sets up the page menu and the filter bar (team, season,
 season type). Each page lives in views/ and reads the chosen filters from
 st.session_state, so every page stays in sync as you click around.
 """
@@ -12,7 +12,13 @@ st.session_state, so every page stays in sync as you click around.
 import streamlit as st
 
 import data
-from components import SEASON_TYPE_LABELS, persisted_widget, season_label, team_meta
+from components import (
+    SEASON_TYPE_LABELS,
+    inject_css,
+    persisted_widget,
+    season_label,
+    team_meta,
+)
 from config import TEAM_ORDER
 
 st.set_page_config(
@@ -20,8 +26,9 @@ st.set_page_config(
     page_icon=":material/sports:",
     layout="wide",
 )
+inject_css()
 
-# Pages, in sidebar order. To add a page: create views/<name>.py and add a line.
+# Pages, in menu order. To add a page: create views/<name>.py and add a line.
 pages = [
     st.Page("views/overview.py", title="Overview", icon=":material/dashboard:"),
     st.Page("views/team.py", title="Team", icon=":material/groups:"),
@@ -30,19 +37,29 @@ pages = [
     st.Page("views/player.py", title="Player", icon=":material/person:"),
     st.Page("views/opponents.py", title="Opponents", icon=":material/swords:"),
 ]
-page = st.navigation(pages)
+# Menu along the top rather than in a sidebar: on a phone it folds into a
+# menu button, instead of a sidebar that has to be opened and closed.
+page = st.navigation(pages, position="top")
 
 
-def sidebar_filters():
+def filter_bar():
+    """
+    Team / season / season type pickers, drawn at the top of every page
+    except the Overview. On a laptop they sit in one row; on a phone
+    Streamlit stacks the three columns into three short rows.
+    """
     teams = data.tracked_teams().set_index("name")
     team_names = [name for name in TEAM_ORDER if name in teams.index]
+    team_col, season_col, type_col = st.columns([4, 2, 3], vertical_alignment="bottom")
+
     team_name = persisted_widget(
-        st.sidebar.radio,
+        team_col.segmented_control,
         "Team",
         team_names,
         "team",
         team_names[0],
         format_func=lambda name: team_meta(name)["short"],
+        label_visibility="collapsed",
     )
     team = teams.loc[team_name]
     st.session_state["team_id"] = int(team["team_id"])
@@ -57,17 +74,18 @@ def sidebar_filters():
 
     games = data.team_games(int(team["team_id"]))
     if games.empty:
-        st.sidebar.caption("No games loaded for this team yet.")
+        season_col.caption("No games loaded for this team yet.")
         return
 
     seasons = sorted(games["season_year"].unique(), reverse=True)
     season_year = persisted_widget(
-        st.sidebar.selectbox,
+        season_col.selectbox,
         "Season",
         seasons,
         "season_year",
         seasons[0],
-        format_func=lambda year: season_label(team["league"], year),
+        format_func=lambda year: f"{season_label(team['league'], year)} season",
+        label_visibility="collapsed",
     )
 
     # Start on the season type of the most recent finished game (e.g.
@@ -77,22 +95,25 @@ def sidebar_filters():
     default_type = finals["season_type"].iloc[-1] if not finals.empty else "regular"
     season_types = [t for t in SEASON_TYPE_LABELS if t in set(in_season["season_type"])]
     persisted_widget(
-        st.sidebar.radio,
+        type_col.segmented_control,
         "Season type",
         season_types,
         "season_type",
         default_type,
         format_func=SEASON_TYPE_LABELS.get,
+        label_visibility="collapsed",
     )
 
 
 if page.title != "Overview":
-    sidebar_filters()
-
-st.sidebar.divider()
-if st.sidebar.button("Refresh data", icon=":material/refresh:", width="stretch"):
-    st.cache_data.clear()
-    st.rerun()
-st.sidebar.caption("Data updates nightly at 4 AM.")
+    filter_bar()
 
 page.run()
+
+# --- Footer ------------------------------------------------------------------
+st.divider()
+note_col, button_col = st.columns([3, 1], vertical_alignment="center")
+note_col.caption("Data updates nightly at 4 AM. Game previews come live from ESPN.")
+if button_col.button("Refresh data", icon=":material/refresh:", width="stretch"):
+    st.cache_data.clear()
+    st.rerun()

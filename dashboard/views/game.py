@@ -12,8 +12,8 @@ from components import (
     format_datetime,
     matchup,
     page_header,
+    matchup_card,
     persisted_widget,
-    season_type_badge,
     stat_table,
     team_meta,
 )
@@ -62,30 +62,12 @@ elif (periods["period_type"] == "overtime").any():
     status = "Final/OT"
 
 
-def team_block(col, name, score, align, label):
-    col.markdown(
-        f"<div style='text-align:{align}'>"
-        f"<div style='font-size:.8rem;opacity:.6;text-transform:uppercase;"
-        f"letter-spacing:.05em'>{label}</div>"
-        f"<div style='font-size:1.1rem;font-weight:600'>{name}</div>"
-        f"<div style='font-size:3rem;font-weight:700;line-height:1.1'>"
-        f"{score:.0f}</div></div>",
-        unsafe_allow_html=True,
-    )
-
-
-with st.container(border=True):
-    away_col, mid_col, home_col = st.columns(3, vertical_alignment="center")
-    team_block(away_col, game["away_team"], game["away_score"], "left", "Away")
-    team_block(home_col, game["home_team"], game["home_score"], "right", "Home")
-    mid_col.markdown(
-        f"<div style='text-align:center'><div style='font-size:1.4rem;"
-        f"font-weight:600'>{status}</div>"
-        f"<div style='opacity:.7'>{format_datetime(game['game_time'])}</div>"
-        f"<div style='opacity:.7'>{game['venue_name'] or ''}</div></div>",
-        unsafe_allow_html=True,
-    )
-    mid_col.markdown(season_type_badge(game["season_type"]), text_alignment="center")
+matchup_card(
+    away={"name": game["away_team"], "big": f"{game['away_score']:.0f}"},
+    home={"name": game["home_team"], "big": f"{game['home_score']:.0f}"},
+    center_lines=[status, format_datetime(game["game_time"]), game["venue_name"]],
+    season_type=game["season_type"],
+)
 
 # --- Line score --------------------------------------------------------------
 if not periods.empty:
