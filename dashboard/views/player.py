@@ -11,6 +11,7 @@ import stats
 from components import (
     add_results,
     empty_state,
+    fact_grid,
     format_date,
     format_short_date,
     format_stat,
@@ -18,6 +19,7 @@ from components import (
     page_header,
     persisted_widget,
     stat_table,
+    stat_tiles,
 )
 from config import DEFAULT_STAT_MODE, STAT_GROUPS
 
@@ -114,20 +116,25 @@ bio = {
 bio = {label: value for label, value in bio.items() if pd.notna(value) and value != ""}
 
 with st.container(border=True):
-    photo_col, info_col = st.columns([1, 5], vertical_alignment="center")
-    if pd.notna(player["headshot_url"]):
-        photo_col.image(player["headshot_url"], width=140)
-    info_col.markdown(f"### {player['name']}")
+    # Photo beside the name (an HTML flex row, so it stays side by side on
+    # a phone instead of stacking), then the bio facts in a wrapping grid.
+    photo = (
+        f"<img src='{player['headshot_url']}' alt='' "
+        "style='width:88px;height:auto;border-radius:.5rem;flex:none'>"
+        if pd.notna(player["headshot_url"])
+        else ""
+    )
+    st.markdown(
+        f"<div style='display:flex;align-items:center;gap:1rem'>{photo}"
+        f"<div style='font-size:1.5rem;font-weight:700;line-height:1.2'>"
+        f"{player['name']}</div></div>",
+        unsafe_allow_html=True,
+    )
     if pd.notna(player["injury_status"]):
-        info_col.badge(
-            player["injury_status"], icon=":material/healing:", color="orange"
-        )
+        st.badge(player["injury_status"], icon=":material/healing:", color="orange")
     if not player["on_roster"]:
-        info_col.caption("No longer on the current roster")
-    cells = info_col.columns(5)
-    for i, (label, value) in enumerate(bio.items()):
-        cells[i % 5].caption(label)
-        cells[i % 5].markdown(f"**{value}**")
+        st.caption("No longer on the current roster")
+    fact_grid(bio)
 
 # --- Stats -------------------------------------------------------------------
 player_rows = wide[wide["player_id"] == player_id] if not wide.empty else wide
@@ -162,27 +169,22 @@ for group in STAT_GROUPS[league]:
     per_game = stats.season_table(player_rows, group, stats.PER_GAME).iloc[0]
     totals = stats.season_table(player_rows, group, stats.TOTALS).iloc[0]
     tile_columns = group["columns"][:SEASON_TILES]
-    tiles = st.columns(len(tile_columns) + 1)
-    with tiles[0].container(border=True):
-        st.metric("Games", int(totals["GP"]))
-        st.caption("played")
-    for tile, column in zip(tiles[1:], tile_columns, strict=True):
+    tiles = [("Games", int(totals["GP"]), "played")]
+    for column in tile_columns:
         label = column["label"]
-        with tile.container(border=True):
-            if column["kind"] == "ratio":
-                # A rate is already "per attempt", so it's the same either way.
-                st.metric(label, format_stat(totals[label], column))
-                st.caption("season")
-            elif not column["average"]:
-                # Marked average=False in config.py (e.g. +/-): total only.
-                st.metric(label, format_stat(totals[label], column))
-                st.caption("season total")
-            elif mode == stats.PER_GAME:
-                st.metric(f"{label}/G", format_stat(per_game[label], column, True))
-                st.caption(f"{format_stat(totals[label], column)} total")
-            else:
-                st.metric(label, format_stat(totals[label], column))
-                st.caption(f"{format_stat(per_game[label], column, True)} per game")
+        total = format_stat(totals[label], column)
+        average = format_stat(per_game[label], column, True)
+        if column["kind"] == "ratio":
+            # A rate is already "per attempt", so it's the same either way.
+            tiles.append((label, total, "season"))
+        elif not column["average"]:
+            # Marked average=False in config.py (e.g. +/-): total only.
+            tiles.append((label, total, "season total"))
+        elif mode == stats.PER_GAME:
+            tiles.append((f"{label}/G", average, f"{total} total"))
+        else:
+            tiles.append((label, total, f"{average} per game"))
+    stat_tiles(tiles)
     st.caption("/G = per game · rates are computed from season totals")
 
     # Game log, oldest to newest, with the opponent and result.
@@ -213,7 +215,7 @@ for group in STAT_GROUPS[league]:
     chart_data[label] = chart_data[label] * scale
     # Dashed line: the season rate for ratios, the per-game average otherwise.
     if column["kind"] == "ratio":
-        average = season[label] * scale
+        average = totals[label] * scale
     else:
         average = chart_data[label].mean()
     average = None if pd.isna(average) else average

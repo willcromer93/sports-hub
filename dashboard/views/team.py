@@ -1,4 +1,4 @@
-"""Team — record, results, and player stats for the team/season in the sidebar."""
+"""Team — record, results, and player stats for the selected team and season."""
 
 import streamlit as st
 
@@ -9,15 +9,14 @@ from components import (
     add_results,
     empty_state,
     format_date,
-    format_datetime,
     format_short_date,
+    format_short_datetime,
     format_stat,
     matchup,
     page_header,
     record,
-    season_label,
-    season_type_badge,
     stat_header,
+    stat_tiles,
     stat_table,
 )
 from config import DEFAULT_STAT_MODE, HEADLINE_STATS, STAT_GROUPS
@@ -47,22 +46,21 @@ games = games[
     (games["season_year"] == season_year) & (games["season_type"] == season_type)
 ]
 finals = games[games["status"] == "final"]
-st.markdown(
-    f"**{season_label(league, season_year)}** &nbsp; {season_type_badge(season_type)}"
-)
 
 # --- Headline numbers --------------------------------------------------------
-scoring_word = {"NHL": "Goals"}.get(league, "Points")
-tiles = st.columns(6)
-tiles[0].metric("Record", record(finals, league), border=True)
-tiles[1].metric("Home", record(finals[finals["is_home"]], league), border=True)
-tiles[2].metric("Away", record(finals[~finals["is_home"]], league), border=True)
 last5 = finals.tail(5)["result"]
-tiles[3].metric("Last 5", "-".join(last5) if not last5.empty else "—", border=True)
 avg_for = f"{finals['team_score'].mean():.1f}" if not finals.empty else "—"
 avg_against = f"{finals['opp_score'].mean():.1f}" if not finals.empty else "—"
-tiles[4].metric(f"{scoring_word} for (avg)", avg_for, border=True)
-tiles[5].metric(f"{scoring_word} against (avg)", avg_against, border=True)
+stat_tiles(
+    [
+        ("Record", record(finals, league)),
+        ("Home", record(finals[finals["is_home"]], league)),
+        ("Away", record(finals[~finals["is_home"]], league)),
+        ("Last 5", "-".join(last5) if not last5.empty else "—"),
+        ("Avg scored", avg_for),
+        ("Avg allowed", avg_against),
+    ]
+)
 
 results_tab, stats_tab, leaders_tab = st.tabs(["Results", "Player stats", "Leaders"])
 
@@ -80,8 +78,8 @@ with results_tab:
     is_final = games["status"] == "final"
     schedule = games.assign(
         Date=games["game_time"]
-        .map(format_date)
-        .where(is_final, games["game_time"].map(format_datetime)),
+        .map(format_short_date)
+        .where(is_final, games["game_time"].map(format_short_datetime)),
         Game=games.apply(matchup, axis=1),
         # Finished games show the score; postponed/canceled games say so.
         Result=games["result_label"].where(
@@ -92,7 +90,7 @@ with results_tab:
     )
     st.caption("Select a finished game to open its box score.")
     event = st.dataframe(
-        schedule[["Date", "Game", "Result", "Venue"]],
+        schedule[["Date", "Result", "Game", "Venue"]],
         hide_index=True,
         width="stretch",
         on_select="rerun",
@@ -160,19 +158,21 @@ with leaders_tab:
             for title, group in groups_by_title.items()
         }
 
-        tiles = st.columns(len(HEADLINE_STATS[league]))
-        for tile, (title, label) in zip(tiles, HEADLINE_STATS[league], strict=True):
+        leader_tiles = []
+        for title, label in HEADLINE_STATS[league]:
             group = groups_by_title[title]
             top = stats.leader(tables[title], group, label, mode, len(finals))
             column = stats.find_column(group, label)
-            with tile.container(border=True):
-                st.caption(f"{title} · {stat_header(column, mode)}")
-                if top is None:
-                    st.markdown("**—**")
-                    continue
-                shown = format_stat(top[label], column, stats.is_averaged(column, mode))
-                st.markdown(f"### {shown}")
-                st.markdown(names.get(top["player_id"], "Unknown"))
+            tile_label = f"{title} · {stat_header(column, mode)}"
+            if top is None:
+                leader_tiles.append((tile_label, "—"))
+                continue
+            shown = format_stat(top[label], column, stats.is_averaged(column, mode))
+            leader_tiles.append(
+                (tile_label, shown, names.get(top["player_id"], "Unknown"))
+            )
+        # Wider minimum so player names fit: 2 per row on a phone.
+        stat_tiles(leader_tiles, min_width=150)
 
         st.caption(
             f"{mode} · averages and rates need "

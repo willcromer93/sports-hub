@@ -15,7 +15,7 @@ The setup instructions below are for a **local development copy** (e.g. for test
 ## Project Structure
 SPORTS-HUB/
 ├── dashboard/ # Streamlit dashboard (run: streamlit run dashboard/app.py)
-│ ├── app.py # Entry point: page list + sidebar filters (team, season, season type)
+│ ├── app.py # Entry point: top page menu + filter bar (team, season, season type)
 │ ├── config.py # EDIT THIS to change stats shown: tables, columns, leader tiles, team colors
 │ ├── data.py # Every SQL query the dashboard runs (cached for 10 minutes)
 │ ├── stats.py # Pivots long-format stats into the tables config.py describes (pandas only)
@@ -163,7 +163,8 @@ results, player stats, leaders) · Game Preview (next games: team stats, leaders
 injuries, last five — live from ESPN, cached an hour, nothing stored) · Game Center
 (scoreboard, line score, both teams' box scores) · Player (bio, season line, game
 log, trend chart) · Opponents (opposing players' stats against your team). Team, season and season type are
-picked in the sidebar and shared across pages. Clicking a row in the Team page's
+picked in the filter bar at the top of each page and shared across pages. Pages are in
+the top menu, which folds into a menu button on a phone. Clicking a row in the Team page's
 results or stat tables opens that game or player.
 
 **Changing what it shows:** almost everything is driven by `dashboard/config.py`:

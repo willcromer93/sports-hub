@@ -1,4 +1,4 @@
-"""Opponents — how opposing players have done against the team in the sidebar."""
+"""Opponents — how opposing players have done against the selected team."""
 
 import streamlit as st
 

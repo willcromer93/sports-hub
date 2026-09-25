@@ -401,3 +401,17 @@ Since the goal is for me to learn, please:
 - ESPN writes the winner's score first ("33-30 OT"). The last-five table flips losses to our-score-first and keeps the OT/SO suffix.
 
 **Pi deploy (in order):** `git pull` → `psql -d sports_hub -f sql/appearances_team_id.sql` → manual `api_pulls.py` run. It **must** happen before the next 4 AM cron run, because the new `insert_box_score()` writes `team_id` and will fail without the column.
+
+### 2026-09-25 (continued) — Mobile layout
+
+- Checked every page at iPhone width (390px) in headless Chrome, emulating a real iPhone.
+- **Bug found:** the Overview "Team page" buttons never navigated. `st.switch_page()` inside an `on_click` callback is ignored, so the switch now happens in the main script when `st.button()` returns True.
+- **Bug found (by pyflakes):** choosing a rate stat (Y/R, FO%) in the Player chart crashed. The variable `season` had been renamed. The page tests now also cover rate-stat charts.
+- **Layout changes:**
+  - The sidebar is gone. Pages are in `st.navigation(position="top")`, which folds into a menu on phones and closes after you tap a page. Team / season / season type are in a filter bar at the top of each page. "Refresh data" is in the footer.
+  - Stat tiles use a CSS grid (`stat_tiles()` in `components.py`): 6 across on a laptop, 3 on a phone. The previous `st.columns` layout stacked one per row.
+  - Page headers, the player bio and preview leader cards use HTML flex rows so photos and logos stay beside the text.
+  - A shared `matchup_card()` keeps away | details | home side by side at any width. Used by Game Center and Game Preview.
+  - Short, important columns (Result, date) come before long ones (opponent name) so they're visible before sideways scrolling.
+  - Whole-number chart axes use explicit tick values. `tickMinStep` gets lost when bars and the average line are layered.
+- Wide stat tables still scroll sideways on a phone. That's expected, since a box score has 10+ columns.

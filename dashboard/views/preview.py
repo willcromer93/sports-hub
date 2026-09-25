@@ -1,5 +1,7 @@
 """Game Preview — pregame matchup for an upcoming game, live from ESPN."""
 
+from html import escape
+
 import pandas as pd
 import streamlit as st
 
@@ -10,10 +12,11 @@ from components import (
     format_date,
     format_datetime,
     format_short_date,
+    local_time,
     matchup,
+    matchup_card,
     page_header,
     persisted_widget,
-    season_type_badge,
     team_meta,
 )
 
@@ -62,37 +65,26 @@ opp_short = theirs.get("short") or opp_name
 # --- Matchup header ------------------------------------------------------------
 
 
-def team_block(col, team, fallback_name, align):
-    with col:
-        if team.get("logo"):
-            st.image(team["logo"], width=64)
-        st.markdown(
-            f"<div style='text-align:{align}'>"
-            f"<div style='font-size:.8rem;opacity:.6;text-transform:uppercase;"
-            f"letter-spacing:.05em'>{team.get('home_away') or ''}</div>"
-            f"<div style='font-size:1.2rem;font-weight:600'>"
-            f"{team.get('name') or fallback_name}</div>"
-            f"<div style='opacity:.7'>{team.get('record') or ''}</div></div>",
-            unsafe_allow_html=True,
-        )
+def side(team, fallback_name):
+    return {
+        "name": team.get("short") or fallback_name,
+        "logo": team.get("logo"),
+        "small": team.get("record"),
+    }
 
 
-with st.container(border=True):
-    left, mid, right = st.columns(3, vertical_alignment="center")
-    # Away team on the left, home on the right, like a scoreboard.
-    if game["is_home"]:
-        team_block(left, theirs, opp_name, "left")
-        team_block(right, ours, team_name, "left")
-    else:
-        team_block(left, ours, team_name, "left")
-        team_block(right, theirs, opp_name, "left")
-    mid.markdown(
-        f"<div style='text-align:center'><div style='font-size:1.3rem;"
-        f"font-weight:600'>{format_datetime(game['game_time'])}</div>"
-        f"<div style='opacity:.7'>{game['venue_name'] or ''}</div></div>",
-        unsafe_allow_html=True,
-    )
-    mid.markdown(season_type_badge(game["season_type"]), text_alignment="center")
+# Away team on the left, home on the right, like a scoreboard.
+our_side, their_side = side(ours, short), side(theirs, opp_name)
+matchup_card(
+    away=their_side if game["is_home"] else our_side,
+    home=our_side if game["is_home"] else their_side,
+    center_lines=[
+        format_date(game["game_time"]),
+        local_time(game["game_time"]).strftime("%-I:%M %p"),
+        game["venue_name"],
+    ],
+    season_type=game["season_type"],
+)
 
 if not preview:
     st.warning(
@@ -131,13 +123,25 @@ def leaders_column(col, team, name):
             st.caption("No season leaders yet.")
             return
         for leader in team["leaders"]:
-            with st.container(border=True):
-                photo, text = st.columns([1, 4], vertical_alignment="center")
-                if leader["headshot"]:
-                    photo.image(leader["headshot"], width=56)
-                text.caption(leader["category"])
-                position = f" · {leader['position']}" if leader["position"] else ""
-                text.markdown(f"**{leader['player']}**{position}  \n{leader['line']}")
+            # One HTML flex row per leader so the photo stays beside the
+            # text on a phone (st.columns would stack them).
+            photo = (
+                f"<img src='{leader['headshot']}' alt='' "
+                "style='width:52px;height:auto;flex:none'>"
+                if leader["headshot"]
+                else "<div style='width:52px;flex:none'></div>"
+            )
+            position = f" · {leader['position']}" if leader["position"] else ""
+            st.markdown(
+                f"<div class='sh-tile' style='display:flex;align-items:center;"
+                f"gap:.75rem;margin-bottom:.5rem'>{photo}<div style='min-width:0'>"
+                f"<div class='sh-label'>{escape(leader['category'] or '')}</div>"
+                f"<div style='font-weight:600'>{escape(leader['player'] or '')}"
+                f"{escape(position)}</div>"
+                f"<div style='font-size:.875rem'>{escape(leader['line'] or '')}</div>"
+                f"</div></div>",
+                unsafe_allow_html=True,
+            )
 
 
 if preview:
@@ -193,12 +197,6 @@ else:
         width="stretch",
     )
 
-    def open_opponent():
+    if st.button(f"{opp_name} players vs {short}", icon=":material/arrow_forward:"):
         st.session_state["opponent_team_id"] = int(game["opponent_id"])
-
-    if st.button(
-        f"{opp_name} players vs {short}",
-        icon=":material/arrow_forward:",
-        on_click=open_opponent,
-    ):
         st.switch_page("views/opponents.py")
