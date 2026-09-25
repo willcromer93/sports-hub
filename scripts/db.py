@@ -306,3 +306,89 @@ def insert_game_periods(conn, game_id, periods):
                 (game_id, period_number, period_type, home_score, away_score),
             )
     conn.commit()
+
+
+def get_games_missing_box_scores(conn):
+    """
+    Find final games that don't have any player_game_appearances rows yet.
+    Returns a list of (game_id, league, external_id, team_id, espn_id) tuples,
+    where team_id/espn_id are for the tracked team that played in the game.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT g.game_id, g.league, g.external_id, t.team_id, t.espn_id
+            FROM games g
+            JOIN teams t
+              ON t.team_id IN (g.home_team_id, g.away_team_id)
+             AND t.is_tracked
+            WHERE g.status = 'final'
+              AND NOT EXISTS (
+                  SELECT 1 FROM player_game_appearances a WHERE a.game_id = g.game_id
+              )
+            ORDER BY g.game_time;
+            """
+        )
+        return cur.fetchall()
+
+
+def upsert_box_score_player(conn, team_id, league, external_id, name):
+    """
+    Return the player_id for a player found in a box score, adding a minimal
+    players row if they aren't there yet (e.g. a preseason cut who was never
+    on a roster pull). An existing player is left completely unchanged —
+    the no-op "SET name = players.name" is only there so RETURNING works,
+    since ON CONFLICT DO NOTHING returns no row.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO players (team_id, league, external_id, name)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (league, external_id)
+            DO UPDATE SET name = players.name
+            RETURNING player_id;
+            """,
+            (team_id, league, external_id, name),
+        )
+        player_id = cur.fetchone()[0]
+    conn.commit()
+    return player_id
+
+
+def insert_box_score(conn, game_id, box_score):
+    """
+    Insert one game's box score for a team into player_game_appearances and
+    player_game_stats. `box_score` is a list of
+    (player_id, did_play, seconds_played, stats), where stats is a dict of
+    {stat_name: stat_value}. Upserts both tables. Commits once at the end,
+    so a game gets either its whole box score or none of it.
+    """
+    with conn.cursor() as cur:
+        for player_id, did_play, seconds_played, stats in box_score:
+            cur.execute(
+                """
+                INSERT INTO player_game_appearances (
+                    game_id, player_id, did_play, seconds_played
+                )
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (game_id, player_id)
+                DO UPDATE SET
+                    did_play = EXCLUDED.did_play,
+                    seconds_played = EXCLUDED.seconds_played;
+                """,
+                (game_id, player_id, did_play, seconds_played),
+            )
+            for stat_name, stat_value in stats.items():
+                cur.execute(
+                    """
+                    INSERT INTO player_game_stats (
+                        game_id, player_id, stat_name, stat_value
+                    )
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (game_id, player_id, stat_name)
+                    DO UPDATE SET stat_value = EXCLUDED.stat_value;
+                    """,
+                    (game_id, player_id, stat_name, stat_value),
+                )
+    conn.commit()
