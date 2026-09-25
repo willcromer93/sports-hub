@@ -206,3 +206,22 @@ Since the goal is for me to learn, please:
 - Build the games pull: `insert_game()` in `db.py` + schedule pull in `api_pulls.py`. ESPN `teams/{id}/schedule` defaults to the current phase (preseason right now), so pass `seasontype=2` for the regular season.
 - On the Pi: `git pull`, then run `phase2_games_schema.sql` (if needed) and `teams_is_tracked.sql` **before** the next 4 AM cron run — the new code will fail without the columns.
 
+### 2026-09-24 (continued) — Games pull built
+
+- **`db.py`:** added `insert_game()`, an upsert on `(league, external_id)` (ESPN event ID). Reruns refresh status, scores, times, and venue.
+- **`api_pulls.py`:** added `pull_games()` plus two helpers, `map_espn_status()` and `extract_score()`. It runs after all four teams are inserted, loops over the tracked teams, calls `upsert_opponent_team()` for the non-tracked side of each game, then `insert_game()`.
+- **ESPN quirks found:**
+  - `/schedule` defaults to the current phase (preseason right now) — `seasontype=2` selects the regular season.
+  - Scores come as `{"value": 23.0, ...}` and are missing until a game starts.
+  - ESPN has many status names (e.g. `STATUS_HALFTIME`), but each also has a simple state (`pre`/`in`/`post`), which is what gets mapped to our 5 allowed values.
+  - `season.year` is the end year for NBA/NHL/NCAAB (2027) but the start year for the NFL (2026).
+  - 25 of Purdue's 28 games have `timeValid=False` (start time TBD).
+  - The schedule has no per-period scores; ESPN's `summary?event={id}` endpoint does.
+- **Verified locally:** ran the pipeline twice (exit 0 both times). Loaded 209 games (NBA 80, NCAAB 28, NHL 84, NFL 17) and 99 opponents (104 teams total, 4 tracked); the second run didn't change any counts. Colts' two final scores are correct (Ravens 41–23 at home, 30–33 at Chiefs). Neutral-site games are flagged (London, Mexico City, Las Vegas). Every game has exactly one tracked team.
+
+**Next up:**
+- `game_periods`: call `summary` only for final games that don't have period rows yet.
+- Decide on preseason/postseason — needs a `season_type` column on `games` first.
+- Maybe a `time_tbd` flag for unannounced start times.
+- Pi deploy: `git pull`, then the two migrations, before the next 4 AM run.
+

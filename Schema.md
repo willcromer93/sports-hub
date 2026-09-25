@@ -83,7 +83,13 @@ Unique on (league, external_id).
 ### games
 One row per game, stored home/away style — each game appears once, no
 matter which of our teams played in it (so Pacers vs. Pistons is one row, and
-a game between two tracked teams isn't duplicated). Not yet populated.
+a game between two tracked teams isn't duplicated). Populated nightly from
+ESPN's team schedule endpoint — **regular season only** for now.
+
+`season_year` is ESPN's season year: the year the season *ends* for
+NBA/NHL/NCAAB (2026-27 → 2027), but the year it *starts* for the NFL (2026).
+`game_time` holds ESPN's placeholder time when a start time hasn't been
+announced yet (common for Purdue) — there's no column to flag that yet.
 
 | Column          | Type        | Notes                                                      |
 |-----------------|-------------|------------------------------------------------------------|
@@ -218,7 +224,10 @@ Unique on (player_id, team_id, season, stat_name) for season stats;
 - `draft_year`/`draft_round`/`draft_pick` always NULL — would need a
   different ESPN endpoint to populate.
 - `teams.capacity` intentionally unpopulated.
-- `games`, `game_periods`, and all player game/season/career stat tables
-  exist but have no data yet.
+- `games` holds regular-season games only. There's no `season_type`
+  column, so preseason/postseason would be indistinguishable if loaded.
+- `games.game_time` can't tell "time TBD" apart from a real start time.
+- `game_periods` and all player game/season/career stat tables exist but
+  have no data yet (per-period scores need ESPN's per-game `summary` endpoint).
 - `sql/schema.sql` is currently a Markdown snapshot, not runnable SQL — the
   Phase 1 tables can't yet be rebuilt from the repo alone.
