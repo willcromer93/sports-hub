@@ -190,3 +190,19 @@ Since the goal is for me to learn, please:
 - When the Pi is back on: run the same `information_schema` check there, and apply `phase2_games_schema.sql` if `games` is still the old design.
 - Turn `sql/schema.sql` into real Phase 1 DDL.
 - Clean up the orphaned Colts row in the local database.
+
+### 2026-09-24 (continued) — Opponents support in `teams` (espn_id + is_tracked)
+
+- **Problem:** `games.home_team_id`/`away_team_id` must both reference `teams`, which only held our 4 teams.
+- **Catch:** ESPN's team IDs collide with existing `external_id` values — ESPN NBA 12 = LA Clippers (Pacers' balldontlie `external_id` is `12`), ESPN NCAAB 125 = Grand Valley State (Purdue's is `125`). Storing opponents with ESPN IDs as `external_id` would have made the upsert overwrite the Pacers row with the Clippers.
+- **Fix — `sql/teams_is_tracked.sql`** (applied to the local DB): new `espn_id` column, unique per league; new `is_tracked` boolean (default false); `external_id` made nullable (NULLs don't clash in a UNIQUE constraint); backfilled the 4 tracked teams (Pacers 11, Purdue 2509, Red Wings 5, Colts 11).
+- **`db.py`:** `insert_team()` now takes `espn_id` (kept via `COALESCE` if omitted) and sets `is_tracked = true`. New `upsert_opponent_team()` keyed on `(league, espn_id)`, for the games pull to call for each game's non-tracked team.
+- **`api_pulls.py`:** passes `espn_id` in all 4 `insert_team()` calls.
+- Opponents will be added **as they appear in schedules** rather than by pre-loading every team in each league — this also covers Purdue's non-D1 opponents.
+- Verified: tested on a throwaway copy first (reruns safe; the Clippers upsert made a new untracked row and didn't touch the Pacers). Then ran the full pipeline locally — exit 0, all 4 teams updated in place with no new team rows.
+- Local player count went from 162 → 192. That's roster churn since the last local run (Red Wings camp roster alone is 51), and departed players are never removed — the known roster-departure gap.
+
+**Next up:**
+- Build the games pull: `insert_game()` in `db.py` + schedule pull in `api_pulls.py`. ESPN `teams/{id}/schedule` defaults to the current phase (preseason right now), so pass `seasontype=2` for the regular season.
+- On the Pi: `git pull`, then run `phase2_games_schema.sql` (if needed) and `teams_is_tracked.sql` **before** the next 4 AM cron run — the new code will fail without the columns.
+
