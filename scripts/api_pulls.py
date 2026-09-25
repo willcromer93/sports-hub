@@ -3,7 +3,9 @@ import os
 import requests
 from db import (
     get_connection,
+    get_games_missing_periods,
     insert_game,
+    insert_game_periods,
     insert_player,
     insert_team,
     upsert_opponent_team,
@@ -101,50 +103,122 @@ def extract_score(competitor):
     return None
 
 
+# ESPN's numeric season types -> the values games.season_type allows
+ESPN_SEASON_TYPES = {1: "preseason", 2: "regular", 3: "postseason"}
+
+
 def pull_games(conn, league, sport_path, espn_team_id, our_team_id):
-    """Pull one tracked team's regular-season schedule from ESPN and upsert
-    every game into games. The opponent is upserted into teams first (as an
-    untracked team), so both home_team_id and away_team_id have a row to
-    point at. Returns the number of games upserted."""
-    response = requests.get(
-        f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/teams/{espn_team_id}/schedule",
-        params={"seasontype": 2},  # 2 = regular season (1 = preseason, 3 = postseason)
-    )
-    events = response.json().get("events", [])
-
-    for event in events:
-        competition = event["competitions"][0]
-
-        # Look up (or create) a team_id for both sides of the game
-        team_ids = {}
-        scores = {}
-        for competitor in competition["competitors"]:
-            side = competitor["homeAway"]  # "home" or "away"
-            team = competitor["team"]
-            if team["id"] == espn_team_id:
-                team_ids[side] = our_team_id
-            else:
-                team_ids[side] = upsert_opponent_team(
-                    conn, league, team["id"], team["displayName"]
-                )
-            scores[side] = extract_score(competitor)
-
-        insert_game(
-            conn,
-            league,
-            event["id"],
-            event["season"]["year"],
-            team_ids["home"],
-            team_ids["away"],
-            event["date"],
-            map_espn_status(competition["status"]["type"]),
-            home_score=scores["home"],
-            away_score=scores["away"],
-            venue_name=competition.get("venue", {}).get("fullName"),
-            is_neutral_site=competition.get("neutralSite", False),
+    """Pull one tracked team's preseason, regular-season, and postseason
+    schedules from ESPN and upsert every game into games. The opponent is
+    upserted into teams first (as an untracked team), so both home_team_id
+    and away_team_id have a row to point at. Returns the number of games upserted."""
+    game_count = 0
+    for espn_season_type, season_type in ESPN_SEASON_TYPES.items():
+        response = requests.get(
+            f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/teams/{espn_team_id}/schedule",
+            params={"seasontype": espn_season_type},
         )
+        events = response.json().get("events", [])
 
-    return len(events)
+        for event in events:
+            competition = event["competitions"][0]
+
+            # Look up (or create) a team_id for both sides of the game
+            team_ids = {}
+            scores = {}
+            for competitor in competition["competitors"]:
+                side = competitor["homeAway"]  # "home" or "away"
+                team = competitor["team"]
+                if team["id"] == espn_team_id:
+                    team_ids[side] = our_team_id
+                else:
+                    team_ids[side] = upsert_opponent_team(
+                        conn, league, team["id"], team["displayName"]
+                    )
+                scores[side] = extract_score(competitor)
+
+            insert_game(
+                conn,
+                league,
+                event["id"],
+                event["season"]["year"],
+                season_type,
+                team_ids["home"],
+                team_ids["away"],
+                event["date"],
+                map_espn_status(competition["status"]["type"]),
+                home_score=scores["home"],
+                away_score=scores["away"],
+                venue_name=competition.get("venue", {}).get("fullName"),
+                is_neutral_site=competition.get("neutralSite", False),
+            )
+
+        game_count += len(events)
+
+    return game_count
+
+
+def extract_linescores(competitor):
+    """ESPN's per-period scores for one team, as a list of ints in order:
+    regulation periods first, then any overtimes, then a shootout (NHL)."""
+    return [
+        int(float(line["displayValue"])) for line in competitor.get("linescores", [])
+    ]
+
+
+def build_periods(home_lines, away_lines, regulation_periods, is_shootout):
+    """Turn two lists of per-period scores into game_periods rows of
+    (period_number, period_type, home_score, away_score).
+    Numbering restarts for each type: regulation 1..N, overtime 1..k,
+    shootout 1 — so NBA double overtime is ('overtime', 1) and ('overtime', 2).
+    ESPN doesn't label which entry is which, so it's worked out from the
+    league's regulation period count (from sport_period_labels) and, for
+    hockey, whether the game ended in a shootout (always the last entry)."""
+    periods = []
+    last_index = len(home_lines) - 1
+    for index, (home, away) in enumerate(zip(home_lines, away_lines)):
+        if index < regulation_periods:
+            periods.append((index + 1, "regulation", home, away))
+        elif is_shootout and index == last_index:
+            periods.append((1, "shootout", home, away))
+        else:
+            periods.append((index - regulation_periods + 1, "overtime", home, away))
+    return periods
+
+
+def pull_game_periods(conn, sport_paths):
+    """Fill in game_periods for every final game that doesn't have them yet.
+    Uses ESPN's per-game summary endpoint (the schedule endpoint has no
+    per-period scores) — one request per game, but only for games not
+    already filled in, so a typical night is just the previous day's games.
+    Returns the number of games filled in."""
+    filled = 0
+    for game_id, league, external_id, regulation_periods in get_games_missing_periods(
+        conn
+    ):
+        response = requests.get(
+            f"https://site.api.espn.com/apis/site/v2/sports/{sport_paths[league]}/summary",
+            params={"event": external_id},
+        )
+        competition = response.json()["header"]["competitions"][0]
+        lines = {
+            c["homeAway"]: extract_linescores(c) for c in competition["competitors"]
+        }
+
+        home_lines = lines.get("home", [])
+        away_lines = lines.get("away", [])
+        if not home_lines or len(home_lines) != len(away_lines):
+            print(
+                f"  No usable period scores for {league} game {external_id}, skipping"
+            )
+            continue
+
+        is_shootout = "/SO" in competition["status"]["type"].get("detail", "")
+        periods = build_periods(home_lines, away_lines, regulation_periods, is_shootout)
+        insert_game_periods(conn, game_id, periods)
+        filled += 1
+
+    return filled
 
 
 # --- Pacers (NBA) ---
@@ -466,5 +540,11 @@ tracked_teams = [
 for label, league, sport_path, espn_team_id, our_team_id in tracked_teams:
     game_count = pull_games(conn, league, sport_path, espn_team_id, our_team_id)
     print(f"{label} games upserted: {game_count}")
+
+# --- Game periods (ESPN per-game summaries) ---
+# Runs after the games pull, so games that just went final get their periods.
+sport_paths = {league: sport_path for _, league, sport_path, _, _ in tracked_teams}
+periods_filled = pull_game_periods(conn, sport_paths)
+print(f"Games with periods filled in: {periods_filled}")
 
 conn.close()

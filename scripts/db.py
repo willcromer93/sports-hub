@@ -201,6 +201,7 @@ def insert_game(
     league,
     external_id,
     season_year,
+    season_type,
     home_team_id,
     away_team_id,
     game_time,
@@ -220,14 +221,15 @@ def insert_game(
         cur.execute(
             """
             INSERT INTO games (
-                league, external_id, season_year,
+                league, external_id, season_year, season_type,
                 home_team_id, away_team_id, game_time, status,
                 home_score, away_score, venue_name, is_neutral_site
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (league, external_id)
             DO UPDATE SET
                 season_year = EXCLUDED.season_year,
+                season_type = EXCLUDED.season_type,
                 home_team_id = EXCLUDED.home_team_id,
                 away_team_id = EXCLUDED.away_team_id,
                 game_time = EXCLUDED.game_time,
@@ -243,6 +245,7 @@ def insert_game(
                 league,
                 external_id,
                 season_year,
+                season_type,
                 home_team_id,
                 away_team_id,
                 game_time,
@@ -256,3 +259,50 @@ def insert_game(
         game_id = cur.fetchone()[0]
     conn.commit()
     return game_id
+
+
+def get_games_missing_periods(conn):
+    """
+    Find final games that don't have any game_periods rows yet, so the
+    per-period pull only requests games it hasn't already filled in.
+    Returns a list of (game_id, league, external_id, regulation_periods) tuples.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT g.game_id, g.league, g.external_id, l.regulation_periods
+            FROM games g
+            JOIN sport_period_labels l ON l.league = g.league
+            WHERE g.status = 'final'
+              AND NOT EXISTS (
+                  SELECT 1 FROM game_periods p WHERE p.game_id = g.game_id
+              )
+            ORDER BY g.game_time;
+            """
+        )
+        return cur.fetchall()
+
+
+def insert_game_periods(conn, game_id, periods):
+    """
+    Insert all of one game's period rows into game_periods.
+    `periods` is a list of (period_number, period_type, home_score, away_score).
+    Upserts on (game_id, period_number, period_type). Commits once at the
+    end, so a game gets either all of its periods or none of them.
+    """
+    with conn.cursor() as cur:
+        for period_number, period_type, home_score, away_score in periods:
+            cur.execute(
+                """
+                INSERT INTO game_periods (
+                    game_id, period_number, period_type, home_score, away_score
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (game_id, period_number, period_type)
+                DO UPDATE SET
+                    home_score = EXCLUDED.home_score,
+                    away_score = EXCLUDED.away_score;
+                """,
+                (game_id, period_number, period_type, home_score, away_score),
+            )
+    conn.commit()

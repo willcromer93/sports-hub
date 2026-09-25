@@ -225,3 +225,21 @@ Since the goal is for me to learn, please:
 - Maybe a `time_tbd` flag for unannounced start times.
 - Pi deploy: `git pull`, then the two migrations, before the next 4 AM run.
 
+### 2026-09-24 (continued) — season_type + game_periods pull
+
+**`season_type`:**
+- `sql/games_season_type.sql` adds `games.season_type` (`preseason`/`regular`/`postseason`). It's added with `DEFAULT 'regular'` to fill in the 209 existing rows, then the default is dropped, so forgetting to set it fails loudly instead of mislabeling a playoff game.
+- `pull_games()` now loops over ESPN season types 1/2/3 (`ESPN_SEASON_TYPES`), and `insert_game()` takes `season_type`.
+
+**`game_periods`:**
+- `db.py`: `get_games_missing_periods()` (the first read-only query function) finds final games with no period rows. `insert_game_periods()` writes all of a game's periods with a single commit, so a game can't end up half-filled and then be skipped forever by the "missing periods" check.
+- `api_pulls.py`: `pull_game_periods()` calls ESPN `summary?event={id}` only for those games. `build_periods()` labels ESPN's unlabeled list: the first N entries (from `sport_period_labels.regulation_periods`) are regulation, then overtime, and the last entry is the shootout when the status is `Final/SO`. Numbering restarts for each type.
+- ESPN facts: in NHL shootouts the winner's shootout entry is `1`, so periods always sum to the final score. NCAAB overtime works like the NBA (2 halves + OT).
+- Tested `build_periods()` first against 8 of last season's games (regular finishes, NBA OT and 2OT, NCAAB OT, NHL OT and shootout, NFL OT) — all 8 summed to their final scores.
+
+**Verified locally:** migration applied, then 2 pipeline runs (exit 0 both). 220 games (+11 preseason), 107 teams, 8 finals → 33 period rows. Every game's periods match its final score, including Colts at Chiefs (OT) and a Red Wings preseason shootout at Columbus. The second run filled 0 games (nothing re-fetched).
+
+**Pi deploy now needs 3 migrations, in order:** `phase2_games_schema.sql` → `teams_is_tracked.sql` → `games_season_type.sql`, then `git pull` + a manual run, before a 4 AM cron run.
+
+**Next up:** player box scores (`player_game_appearances`/`player_game_stats`) — the same `summary` response has a `boxscore` section.
+
