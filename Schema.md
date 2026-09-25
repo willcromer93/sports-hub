@@ -22,6 +22,8 @@ The Pi has not been re-verified since the 2026-08-30 migration.*
 5. `sql/stat_rollups_season_type.sql`: adds `season_type` to both rollup
    tables and changes `player_season_stats.season` (text) to `season_year`
    (integer). Safe to rerun.
+6. `sql/appearances_team_id.sql`: adds `team_id` to `player_game_appearances`
+   (which side the player was on) and backfills it. Safe to rerun.
 
 ### teams
 One row per team, across all four leagues — our four tracked teams plus
@@ -165,8 +167,9 @@ told apart from "played and recorded a zero" — a player who didn't dress
 has no row at all, distinct from a player who played but had, say, zero
 rebounds.
 
-Filled in nightly for our tracked team (not opponents) in every final game
-that doesn't have rows yet, from ESPN's per-game `summary` box score.
+Filled in nightly for **both teams** in every final game, from ESPN's
+per-game `summary` box score. Each side is filled in separately, only if
+that team has no rows for the game yet.
 `did_play = false` only comes from basketball, where ESPN lists DNPs
 (e.g. coach's decision); NHL/NFL box scores only list players who played.
 NFL players who played without recording a stat (e.g. some special teams
@@ -177,10 +180,13 @@ snaps) aren't in ESPN's box score, so they have no row.
 | appearance_id  | SERIAL PK  |                    |
 | game_id        | INTEGER FK | references games   |
 | player_id      | INTEGER FK | references players |
+| team_id        | INTEGER FK | references teams; NOT NULL — the team the player was on **in this game** (ours or the opponent). Use this, not `players.team_id` (current team only), to split a game's two sides |
 | did_play       | BOOLEAN    |                    |
 | seconds_played | INTEGER    | see below          |
 
-Unique on (game_id, player_id).
+Unique on (game_id, player_id). Index on (team_id, game_id). `team_id` added
+by `sql/appearances_team_id.sql`. `player_game_stats` has no team column of
+its own — join through this table on (game_id, player_id) to get a stat's side.
 
 `seconds_played` is the canonical time column across sports:
 NBA/NCAAB store whole minutes × 60, NHL stores exact seconds (from MM:SS
@@ -222,9 +228,10 @@ How ESPN's box score becomes rows (`parse_box_score()` in `api_pulls.py`):
   player goal, so player `goals` sum to the team score minus 1 for a
   shootout win.
 
-A box score player who isn't in `players` yet (e.g. a preseason cut) gets a
-minimal row (team, league, ESPN ID, name) via `upsert_box_score_player()`;
-existing players are never modified by the box score pull.
+A box score player who isn't in `players` yet (e.g. a preseason cut, or any
+opponent player) gets a minimal row (team, league, ESPN ID, name) via
+`upsert_box_score_player()`; existing players are never modified by the box
+score pull. ESPN's box score has no position, so opponents' `position` is NULL.
 
 ### player_season_stats / player_career_stats
 Pre-aggregated rollups of `player_game_stats`, one row per player per stat
@@ -238,7 +245,7 @@ stat can't leave a stale total behind.
 |----------------|-------------|-----------------------------------------|
 | season_stat_id / career_stat_id | SERIAL PK |                          |
 | player_id      | INTEGER FK  | references players                      |
-| team_id        | INTEGER FK  | season table only — the tracked team in those games (not `players.team_id`, which is the current team) |
+| team_id        | INTEGER FK  | season table only — `player_game_appearances.team_id` for those games (not `players.team_id`, which is the current team) |
 | season_year    | INTEGER     | season table only — same meaning as `games.season_year` |
 | season_type    | TEXT        | preseason / regular / postseason — never mixed together |
 | stat_name      | TEXT        |                                         |
@@ -289,7 +296,9 @@ data collection started (2026) — not a player's full professional career.
 - `game_periods` and box scores are written once per game by the nightly
   pull, then re-checked weekly by `refresh_stats.py` for 14 days after the
   game. A correction ESPN makes after that window isn't picked up.
-- Box scores cover our tracked teams only, not opponents.
+- The rollups cover our tracked teams' players only. Opponents' box scores
+  are stored, but the dashboard aggregates them from `player_game_stats`
+  directly ("stats vs our team" isn't a real season line).
 - `player_season_stats` / `player_career_stats` exist but have no data yet.
 - `sql/schema.sql` is currently a Markdown snapshot, not runnable SQL — the
   Phase 1 tables can't yet be rebuilt from the repo alone.
