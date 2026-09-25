@@ -1,0 +1,19 @@
+# Streamlit settings for the dashboard. Streamlit reads this file from the
+# folder you run `streamlit run` in — so run it from the project root.
+
+[theme]
+base = "light"
+primaryColor = "#2a78d6"
+backgroundColor = "#fcfcfb"
+secondaryBackgroundColor = "#f3f2ef"
+textColor = "#1f1f1d"
+borderColor = "#e6e5e1"
+showSidebarBorder = true
+baseRadius = "medium"
+font = "sans-serif"
+
+[client]
+toolbarMode = "minimal"
+
+[server]
+headless = true
