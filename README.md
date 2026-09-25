@@ -19,10 +19,11 @@ SPORTS-HUB/
 │ ├── api_pulls.py # Pulls team + player data from external sports APIs, upserts into Postgres
 │ └── db.py # Database connection + insert functions (get_connection, insert_team, insert_player)
 ├── sql/
-│ └── schema.sql # Full Postgres schema (7 tables)
+│ ├── schema.sql # Phase 1 schema — currently a Markdown snapshot, not runnable SQL (to be replaced)
+│ └── phase2_games_schema.sql # Phase 2 DDL: games, game_periods, sport_period_labels (+ seeds), game_id FKs
 ├── venv/ # Python virtual environment (not tracked in git)
 ├── .env # API keys + DB credentials (not tracked in git)
-├── SCHEMA.md # Current database schema documentation
+├── Schema.md # Current database schema documentation (9 tables)
 ├── CLAUDE_PROJECT_NOTES.md # Dated running log of project progress/decisions
 └── .gitignore
 
@@ -67,7 +68,14 @@ DB_PASSWORD=your_postgres_password
 
 ### 4. Database
 
-Requires a local Postgres instance (this project uses Postgres.app on macOS) with a `sports_hub` database and the schema in `sql/schema.sql` already applied.
+Requires a local Postgres instance (this project uses Postgres.app on macOS) with a `sports_hub` database and the full schema applied (see `Schema.md` for build order):
+
+1. Phase 1 tables (`teams`, `players`, and the player game/season/career stat tables). `sql/schema.sql` doesn't yet contain runnable SQL for these, so for now copy them from an existing database with `pg_dump --schema-only`.
+2. Phase 2 tables, which are safe to rerun:
+
+```bash
+psql -h localhost -d sports_hub -f sql/phase2_games_schema.sql
+```
 
 ## Scripts
 
