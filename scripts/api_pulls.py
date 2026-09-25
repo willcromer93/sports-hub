@@ -1,7 +1,13 @@
 import os
 
 import requests
-from db import get_connection, insert_player, insert_team
+from db import (
+    get_connection,
+    insert_game,
+    insert_player,
+    insert_team,
+    upsert_opponent_team,
+)
 from dotenv import load_dotenv
 
 # --- Load API key from .env ---
@@ -66,6 +72,79 @@ def extract_team_venue_fields(team_data):
     venue = venue_info.get("fullName")
     city = venue_info.get("address", {}).get("city")
     return venue, city
+
+
+def map_espn_status(status_type):
+    """Translate ESPN's game status into one of the values games.status allows
+    ('scheduled', 'in_progress', 'final', 'postponed', 'canceled').
+    ESPN has many specific names (STATUS_HALFTIME, STATUS_END_PERIOD, ...),
+    but every one also carries a simple state: 'pre', 'in', or 'post'."""
+    name = status_type.get("name", "")
+    if name == "STATUS_POSTPONED":
+        return "postponed"
+    if name in ("STATUS_CANCELED", "STATUS_CANCELLED"):
+        return "canceled"
+    state = status_type.get("state")
+    if state == "in":
+        return "in_progress"
+    if state == "post":
+        return "final"
+    return "scheduled"
+
+
+def extract_score(competitor):
+    """ESPN gives scores as {"value": 23.0, "displayValue": "23"},
+    or leaves the key out entirely before a game starts."""
+    score = competitor.get("score")
+    if isinstance(score, dict) and score.get("value") is not None:
+        return int(score["value"])
+    return None
+
+
+def pull_games(conn, league, sport_path, espn_team_id, our_team_id):
+    """Pull one tracked team's regular-season schedule from ESPN and upsert
+    every game into games. The opponent is upserted into teams first (as an
+    untracked team), so both home_team_id and away_team_id have a row to
+    point at. Returns the number of games upserted."""
+    response = requests.get(
+        f"https://site.api.espn.com/apis/site/v2/sports/{sport_path}/teams/{espn_team_id}/schedule",
+        params={"seasontype": 2},  # 2 = regular season (1 = preseason, 3 = postseason)
+    )
+    events = response.json().get("events", [])
+
+    for event in events:
+        competition = event["competitions"][0]
+
+        # Look up (or create) a team_id for both sides of the game
+        team_ids = {}
+        scores = {}
+        for competitor in competition["competitors"]:
+            side = competitor["homeAway"]  # "home" or "away"
+            team = competitor["team"]
+            if team["id"] == espn_team_id:
+                team_ids[side] = our_team_id
+            else:
+                team_ids[side] = upsert_opponent_team(
+                    conn, league, team["id"], team["displayName"]
+                )
+            scores[side] = extract_score(competitor)
+
+        insert_game(
+            conn,
+            league,
+            event["id"],
+            event["season"]["year"],
+            team_ids["home"],
+            team_ids["away"],
+            event["date"],
+            map_espn_status(competition["status"]["type"]),
+            home_score=scores["home"],
+            away_score=scores["away"],
+            venue_name=competition.get("venue", {}).get("fullName"),
+            is_neutral_site=competition.get("neutralSite", False),
+        )
+
+    return len(events)
 
 
 # --- Pacers (NBA) ---
@@ -375,5 +454,17 @@ for group in groups:
             injury_status=injury_status,
         )
         print(f"  Inserted player_id {player_id}: {a['fullName']}")
+
+# --- Games (ESPN schedules) ---
+# Runs after all four teams are inserted, since each game needs our team's team_id.
+tracked_teams = [
+    ("Pacers", "NBA", "basketball/nba", "11", pacers_id),
+    ("Purdue", "NCAAB", "basketball/mens-college-basketball", "2509", purdue_id),
+    ("Red Wings", "NHL", "hockey/nhl", "5", red_wings_id),
+    ("Colts", "NFL", "football/nfl", "11", colts_id),
+]
+for label, league, sport_path, espn_team_id, our_team_id in tracked_teams:
+    game_count = pull_games(conn, league, sport_path, espn_team_id, our_team_id)
+    print(f"{label} games upserted: {game_count}")
 
 conn.close()

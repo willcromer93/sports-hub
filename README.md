@@ -105,7 +105,8 @@ Pulls team and player data for all four teams and loads it into Postgres. **Safe
 1. Loads API keys/DB credentials from `.env` and opens a Postgres connection.
 2. Pulls team identity for all four teams from their respective sources and upserts into `teams`, along with venue/city/founded_year enrichment (venue/city sourced from ESPN's team endpoint for NBA/NHL/NFL; hardcoded for Purdue, since ESPN's college basketball endpoint doesn't return venue data. `founded_year` is hardcoded for all four teams — no API provides it).
 3. Pulls full player rosters for all four teams from ESPN's roster endpoint (`site.api.espn.com/apis/site/v2/sports/{sport}/{league}/teams/{team_id}/roster`) and upserts into `players`, including physical stats, birth info, college, contract summary (current season + total value/years/expiration), injury status, and headshot URL.
-4. Closes the database connection.
+4. Pulls each team's regular-season schedule from ESPN (`.../teams/{team_id}/schedule?seasontype=2`) and upserts every game into `games`. Each opponent is upserted into `teams` first (as an untracked team) so the game's home/away team IDs have a row to point at. Reruns refresh status, scores, and schedule changes in place.
+5. Closes the database connection.
 
 **Run it manually (local dev):**
 
@@ -134,7 +135,8 @@ python api_pulls.py
 - [x] Add team-level enrichment: venue, city, founded year (`capacity` added to schema but intentionally left unpopulated)
 - [x] Move to 24/7 infrastructure (Raspberry Pi) independent of a laptop
 - [x] Add scheduling (`cron`) to pull data on a regular interval
-- [ ] Populate `games`, `player_game_stats`, and related tables — currently empty, blocking dashboard work
+- [x] Populate `games` (regular-season schedules + final scores, all four teams)
+- [ ] Populate `game_periods`, `player_game_stats`, and related tables
 - [ ] Add error handling for failed requests (non-200 responses, timeouts)
 - [ ] Add logging instead of print statements
 - [ ] Add a mechanism to detect players who've left a team's roster (current upsert-only pattern can't remove/flag departed players)

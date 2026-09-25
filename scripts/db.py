@@ -194,3 +194,65 @@ def insert_player(
         player_id = cur.fetchone()[0]
     conn.commit()
     return player_id
+
+
+def insert_game(
+    conn,
+    league,
+    external_id,
+    season_year,
+    home_team_id,
+    away_team_id,
+    game_time,
+    status,
+    home_score=None,
+    away_score=None,
+    venue_name=None,
+    is_neutral_site=False,
+):
+    """
+    Insert a game into the games table.
+    Upserts on (league, external_id), so rerunning refreshes status,
+    scores, and schedule changes (e.g. a new start time) in place.
+    Returns the game_id.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO games (
+                league, external_id, season_year,
+                home_team_id, away_team_id, game_time, status,
+                home_score, away_score, venue_name, is_neutral_site
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (league, external_id)
+            DO UPDATE SET
+                season_year = EXCLUDED.season_year,
+                home_team_id = EXCLUDED.home_team_id,
+                away_team_id = EXCLUDED.away_team_id,
+                game_time = EXCLUDED.game_time,
+                status = EXCLUDED.status,
+                home_score = EXCLUDED.home_score,
+                away_score = EXCLUDED.away_score,
+                venue_name = EXCLUDED.venue_name,
+                is_neutral_site = EXCLUDED.is_neutral_site,
+                last_updated = now()
+            RETURNING game_id;
+            """,
+            (
+                league,
+                external_id,
+                season_year,
+                home_team_id,
+                away_team_id,
+                game_time,
+                status,
+                home_score,
+                away_score,
+                venue_name,
+                is_neutral_site,
+            ),
+        )
+        game_id = cur.fetchone()[0]
+    conn.commit()
+    return game_id
