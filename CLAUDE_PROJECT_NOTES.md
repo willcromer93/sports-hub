@@ -307,3 +307,97 @@ Since the goal is for me to learn, please:
 
 **Pi deploy now needs 4 migrations, in order:** `phase2_games_schema.sql` → `teams_is_tracked.sql` → `games_season_type.sql` → `stat_rollups_season_type.sql`.
 
+
+### 2026-09-25 — Streamlit dashboard, first version
+
+- **Layout (`dashboard/`):**
+  - `app.py` sets up navigation and the sidebar filters.
+  - `config.py` holds every "what to show" choice.
+  - `data.py` has all the SQL.
+  - `stats.py` does the pandas reshaping.
+  - `components.py` / `charts.py` hold shared UI and charts.
+  - `views/` has one file per page.
+  - The theme is in `.streamlit/config.toml` at the project root.
+- **Pages:** Overview, Team (Results / Player stats / Leaders tabs), Game Center, Player.
+- **Config-driven stats:** tables are defined per league in `STAT_GROUPS` using two builders:
+  - `stat()` for counting stats, which can add several keys together, e.g. NHL PTS = goals + assists.
+  - `ratio()` for rates, which are always recomputed from summed totals.
+  - A group's `requires` key decides who appears, e.g. only goalies have `saves`.
+- **Why not the rollup tables:** the dashboard aggregates straight from
+  `player_game_stats` rather than reading `player_season_stats`. This is so rates like FG% and SV%
+  can be recomputed from totals, and so a game log and a season line always come from the same numbers.
+  - Playing time is unioned in from `player_game_appearances` as a pseudo-stat (`seconds_played`).
+- **Streamlit gotchas hit:**
+  - Values pulled out of pandas are `numpy.int64`, which psycopg2 can't send. `run_query()` converts them with `.item()`.
+  - NULLs come back as `NaN` (a float), so bio fields are checked with `pd.notna()`, not truthiness.
+  - `.values` drops a timestamp's timezone.
+  - Streamlit forgets a widget's value on pages that don't draw it. `persisted_widget()` keeps the real value in `st.session_state`.
+- **Verified:**
+  - Every page ran for all four teams against the local DB with no errors (Streamlit's `AppTest`).
+  - Screenshots were checked in headless Chrome.
+  - The Colts box score (Sep 20 @ KC, 30–33 OT) matches the stored line score, and Red Wings preseason leaders render.
+  - The Pacers and Purdue pages show empty states until their games start.
+
+**Next up:**
+- Deploy to the Pi (install streamlit/pandas/altair in the Pi venv; keep it on Tailscale only until the Cloudflare Tunnel step).
+- Blank cells in stat tables show as a grey "None" (Streamlit's default). Could be swapped for "—".
+
+### 2026-09-25 (continued) — Per-game averages, season-type labels
+
+- **Per-game averages everywhere:**
+  - `DEFAULT_STAT_MODE` is now "Per game" for all four leagues. The Team page's Per game / Totals toggle is still there.
+  - Averaged columns are relabelled `PTS/G` (via `stat_header()` in `components.py`) so an average is never mistaken for a total. Rates like FG% keep their name.
+  - Player page tiles show the per-game average, with the season total underneath.
+- **Preseason vs. regular season vs. postseason:**
+  - The sidebar's Season type filter was already there. Now it's also visible on the pages:
+    - Team page: a colored badge next to the season (grey Preseason / blue Regular season / violet Postseason).
+    - Game Center: the same badge under the score.
+    - Overview: a "Type" column that flags preseason/postseason games and stays blank for regular season.
+  - Overview's Upcoming and Latest results tables are now stacked full-width. Side by side, the extra column got cut off.
+
+### 2026-09-25 (continued) — Per-page stat defaults, +/- as a total
+
+- `stat()` in `config.py` takes `average=False` for stats that should always show as a season total. +/- uses it, because a per-game plus/minus isn't a useful number.
+  - `stats.is_averaged()` is the one place that decides whether a column is averaged. Tables, "/G" labels, number formats and leader rules all ask it.
+- `DEFAULT_STAT_MODE` is now per page instead of per league:
+  - Team page opens on **Per game**.
+  - Player page opens on **Totals**.
+  - Both pages have a Per game / Totals toggle, and each opens back on its default when you return to it.
+- Player tiles show the selected mode as the big number and the other mode underneath ("0.3 per game" or "1 total").
+
+### 2026-09-25 (continued) — Opponent box scores + Game Preview
+
+**Decisions (asked, then built):**
+- The pregame preview comes **live from ESPN** when the page opens, cached for an hour. No tables, so nothing to wipe after the game.
+- **Full opponent box scores are stored permanently**, the same way as our own teams'.
+
+**Schema — `sql/appearances_team_id.sql`:**
+- Adds `player_game_appearances.team_id`: which side the player was on *in that game*.
+- Backfilled from the tracked team, since every earlier row was ours. Then set NOT NULL, with an index on (team_id, game_id).
+- `player_game_stats` gets its side by joining on (game_id, player_id). I checked first that no stat row lacks an appearance (0 found).
+- Tested twice on a throwaway copy (`createdb -T`) before applying locally.
+
+**Pipeline:**
+- `get_games_missing_box_scores()` works per side, not per game. The 8 existing finals got just their opponent side filled in.
+- `insert_box_score()` takes `team_id`, and `replace=True` only deletes that side.
+- `get_box_score()` and `get_recent_final_games()` are per side.
+- `refresh_stats.py` checks both sides and fetches each ESPN summary once per game.
+- `fetch_summary()` now has a 30-second timeout.
+- Rollups take the team from `a.team_id` and stay limited to tracked teams, so their meaning is unchanged.
+
+**Verified locally:**
+- Our own box scores and both rollup tables have **identical md5 checksums** before and after.
+- 8 opponent sides were added: 265 → 511 appearances, 192 → 436 players.
+- Opponent NHL player goals match final scores (Columbus shows 0 for its 1-0 shootout win, as expected).
+- A pipeline rerun added 0 sides.
+- The weekly refresh caught a real ESPN correction (Daniel Jones adjQBR 73.0 → 73.8). A second run found 0 changes.
+
+**Dashboard:**
+- Every "our players" query filters on `a.team_id`. Before this, a Colts page would have included the opponents' players from the same game.
+- New **Game Preview** page: team stats side by side, leaders with headshots, injuries, last five games, and previous meetings from our DB.
+- New **Opponents** page: this season or all seasons, all opponents or one, per game or totals.
+- Game Center shows both box scores in tabs.
+- Blank cells show "—" (`st.dataframe(placeholder=...)`), and an all-blank Pos column is hidden. ESPN box scores don't include positions, so opponents have none.
+- ESPN writes the winner's score first ("33-30 OT"). The last-five table flips losses to our-score-first and keeps the OT/SO suffix.
+
+**Pi deploy (in order):** `git pull` → `psql -d sports_hub -f sql/appearances_team_id.sql` → manual `api_pulls.py` run. It **must** happen before the next 4 AM cron run, because the new `insert_box_score()` writes `team_id` and will fail without the column.
