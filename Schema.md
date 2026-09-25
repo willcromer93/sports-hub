@@ -4,8 +4,8 @@ Current-state documentation of the `sports_hub` Postgres database. This file
 reflects what's actually live, not the original design — see
 `CLAUDE_PROJECT_NOTES.md` for the dated history of how it got here.
 
-*Last verified against the local (Mac) database via `information_schema`: 2026-09-24.
-The Pi has not been re-verified since the 2026-08-30 migration.*
+*Last verified against the local (Mac) database via `information_schema`: 2026-09-25.
+The Pi was brought up to date the same day and its 93 columns match the Mac's exactly.*
 
 ## Tables
 

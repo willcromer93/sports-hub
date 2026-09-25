@@ -415,3 +415,61 @@ Since the goal is for me to learn, please:
   - Short, important columns (Result, date) come before long ones (opponent name) so they're visible before sideways scrolling.
   - Whole-number chart axes use explicit tick values. `tickMinStep` gets lost when bars and the average line are layered.
 - Wide stat tables still scroll sideways on a phone. That's expected, since a box score has 10+ columns.
+
+### 2026-09-25 (continued) — Pi deployment: pipeline, dashboard, public link
+
+**State found on the Pi (off for about a week):**
+- Code was at `0e8b4c7` (Aug 29).
+- GitHub `main` was 7 commits behind the Mac, because nothing had been pushed since Aug 30. Fixed with a merge of `dashboard` → `main` and a push.
+- The database still had the original 7-table layout, with the old per-team `games` table (`team_id`, `game_date`, `opponent`, …). All game/box/rollup tables were empty. 4 teams, 186 players.
+
+**Steps (a backup was taken first: `~/sports_hub_backup_2026-09-25.sql`):**
+1. Dropped the empty old `games` table with `CASCADE`, which also removed its two `game_id` FKs. A guard stopped the drop if the table had any rows.
+   - Why it was needed: `phase2_games_schema.sql` uses `CREATE TABLE IF NOT EXISTS`, so it would have silently kept the old table.
+2. `git pull` → `3bd0a74`, then ran all 5 migrations in order. The Pi's `information_schema` columns (93) are now identical to the Mac's.
+3. Installed `streamlit==1.60.0 pandas==3.0.5 altair==6.2.2` in the Pi venv (Python 3.13.5, PostgreSQL 17.11).
+4. First pipeline run (exit 0): 220 games, 8 finals, 33 period rows, 511 appearances, 5,329 stat rows, 1,436 rollups. Matches the Mac exactly, including a checksum over every stat value keyed by ESPN ids.
+5. Crontab:
+   - Removed a leftover `9 11 * * *` line (the August cron test), which had been running the pipeline a second time every day.
+   - Added the Sunday 5 AM `refresh_stats.py` line, written in the same style as the nightly line (runs from the project root).
+   - The old crontab is saved in `~/crontab_backup_2026-09-25.txt`. The refresh line was test-run (exit 0, 0 changes).
+6. Dashboard runs as systemd service `sports-hub-dashboard` (port 8501, `0.0.0.0`, restarts on failure, starts at boot). All 6 pages loaded from the Pi with no errors.
+7. Public link: `sudo tailscale funnel --bg 8501` → https://sportshub.taildca027.ts.net. Free, no login, and anyone with the link can view it. Chosen over a Cloudflare Tunnel with a domain for now.
+
+**Gotchas hit:**
+- A heredoc's closing marker (`SQL`) must start at column 0. An indented paste leaves the shell waiting at a `>` prompt.
+- `psql` without the `.env` values loaded logs in as the Linux user `wcromer`, which isn't a database role ("role does not exist").
+- `pkill -f "streamlit run …"` run over SSH also matched the SSH command's own text and killed the session. Use a pattern like `[s]treamlit` or `systemctl` instead.
+- Headless Chrome couldn't resolve `sportshub.local`, but `curl` could. The IP address works.
+- Right after Funnel was first enabled, public DNS had no record for the name for several minutes. It only resolved on devices with Tailscale on.
+- Set up passwordless SSH from the Mac (`ssh-keygen -t ed25519` + `ssh-copy-id`). `sudo` on the Pi still needs a password.
+
+**Reboot test: passed.** After `sudo reboot`, Postgres, the dashboard service and Funnel all came back on their own, and the crontab was intact.
+
+**Still to do (optional):** an "ESPN data, not affiliated" credit in the footer, now that the site is public.
+
+**Funnel update (same day):**
+- Funnel is on and correctly configured: `AllowFunnel` is true, the cert was issued, the admin console shows the "Funnel" badge, and netcheck is fine.
+- But Tailscale never created the public DNS record. The ts.net authoritative nameservers (dnsimple) have no A/AAAA/CNAME for `sportshub.taildca027.ts.net`, so the link only works on devices running Tailscale.
+- This matches the known Tailscale bug tailscale/tailscale#21429 (started 2026-09-22, closed "not planned", no workaround). A clean off/on cycle didn't help.
+- Decision: leave Funnel on and wait for Tailscale to fix it.
+- Fallbacks if it stays broken:
+  - ngrok free static domain: permanent address, but visitors see a one-time warning page first.
+  - Cloudflare quick tunnel: works instantly, but the URL changes on every restart.
+  - Contact Tailscale support.
+- The operator is set (`tailscale set --operator=wcromer`), so Funnel can be managed over SSH without sudo.
+- Check whether it's live: `dig +short sportshub.taildca027.ts.net @8.8.8.8` returns IPs once the record exists.
+- **Resolved ~14:05:** about 6 minutes after a clean off → wait 20s → on cycle, Tailscale created the record (A 199.38.181.54, 209.177.145.137) and the page returned HTTP 200 over the public internet.
+  - For a few minutes the two authoritative nameservers flickered between having the record and not (the intermittent variant of the bug), then both answered consistently.
+  - If it breaks again, repeat the off/on cycle and wait about 10 minutes.
+
+**End of day 2026-09-25: everything in sync.**
+- The Mac, GitHub `main` and the Pi are all on the same commit.
+- The public link returns HTTP 200 over the public internet through both Funnel ingress IPs.
+- If a device still says the link "can't be found" after Tailscale DNS starts working, that device (or the router) cached the earlier "doesn't exist" answer.
+  - It clears on its own, usually within minutes.
+  - On a Mac, clear it now with `sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder`.
+
+**Next up:**
+- Optional footer credit line ("Data from ESPN · not affiliated").
+- Roadmap items from the README: error handling/logging in the pipeline, and detecting players who have left a roster.

@@ -6,8 +6,13 @@ A data pipeline project that pulls team and player data for four Indiana-area sp
 
 **Production runs 24/7 on a dedicated Raspberry Pi 4**, independent of any laptop:
 - PostgreSQL lives on the Pi
-- `scripts/api_pulls.py` runs automatically every night at 4:00 AM via `cron`
+- `scripts/api_pulls.py` runs automatically every night at 4:00 AM via `cron`, and
+  `scripts/refresh_stats.py` every Sunday at 5:00 AM
+- The Streamlit dashboard runs as a systemd service (`sports-hub-dashboard`) on port 8501
 - The Pi is reachable remotely via [Tailscale](https://tailscale.com) for private access from anywhere (phone, work, etc.)
+- The dashboard (only) is public at **https://sportshub.taildca027.ts.net** via Tailscale
+  Funnel. If it ever stops resolving, it's usually Tailscale's DNS (see tailscale/tailscale#21429);
+  a clean `tailscale funnel --https=443 off`, wait 20s, `tailscale funnel --bg 8501` fixed it once
 - Postgres itself is **not** exposed to the public internet — reachable only via Tailscale or from the Pi itself
 
 The setup instructions below are for a **local development copy** (e.g. for testing script changes before deploying them to the Pi) — separate from the live production setup running on the Pi.
@@ -182,6 +187,45 @@ results or stat tables opens that game or player.
 To add a page, create `dashboard/views/<name>.py` and add a line to the `pages`
 list in `dashboard/app.py`.
 
+## Running on the Pi
+
+Everything lives in `/home/wcromer/sports-hub` on the Pi (hostname `sportshub`, user
+`wcromer`). The Mac can SSH in without a password (`ssh wcromer@sportshub.local`) via
+an ed25519 key.
+
+**Scheduled jobs** (`crontab -l`; the file must end with a newline or the last line is
+silently skipped):
+```
+0 4 * * * cd /home/wcromer/sports-hub && venv/bin/python scripts/api_pulls.py >> /home/wcromer/sports-hub/logs/pipeline.log 2>&1
+0 5 * * 0 cd /home/wcromer/sports-hub && venv/bin/python scripts/refresh_stats.py >> /home/wcromer/sports-hub/logs/refresh.log 2>&1
+```
+
+**Dashboard service**: `/etc/systemd/system/sports-hub-dashboard.service` runs
+`venv/bin/streamlit run dashboard/app.py --server.address 0.0.0.0 --server.port 8501`
+from the project folder, starts at boot, and restarts if it crashes.
+- Status: `systemctl status sports-hub-dashboard`
+- Logs: `journalctl -u sports-hub-dashboard -n 50`
+- Restart (after pulling new code): `sudo systemctl restart sports-hub-dashboard`
+
+**Where to open it**
+- Home WiFi: http://sportshub.local:8501 (or http://192.168.68.62:8501)
+- Your own devices, anywhere: Tailscale on → http://sportshub.taildca027.ts.net:8501
+- Anyone with the link: https://sportshub.taildca027.ts.net (Tailscale Funnel)
+  - Status: `tailscale funnel status`
+  - Turn off: `tailscale funnel reset` / back on: `tailscale funnel --bg 8501` (no `sudo`
+    needed: the `wcromer` user is set as Tailscale operator)
+  - If a device says the link can't be found but it works elsewhere, that device cached an old
+    "doesn't exist" DNS answer; on a Mac: `sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder`
+
+**Deploying a change**
+1. Mac: commit, then `git push origin main`
+2. Pi: `cd ~/sports-hub && git pull`
+3. Pi: run any new `sql/*.sql` migration (`psql -v ON_ERROR_STOP=1 -f sql/<file>.sql`) —
+   before the next 4 AM run if the new code depends on it
+4. Pi: `sudo systemctl restart sports-hub-dashboard`
+
+Dashboard packages are pinned to match the Mac: `streamlit==1.60.0 pandas==3.0.5 altair==6.2.2`.
+
 ## API Notes
 
 - **balldontlie.io** — requires an `Authorization` header with your API key. Used for NBA/NCAAB team identity only (kept stable/unchanged from original inserts — see note below). Its `/players` endpoint returns historically-associated players rather than current roster, and its `/players/active` endpoint (which would fix that) requires a paid tier — so player rosters are pulled from ESPN instead.
@@ -210,7 +254,8 @@ list in `dashboard/app.py`.
 - [ ] Add a mechanism to detect players who've left a team's roster (current upsert-only pattern can't remove/flag departed players)
 - [x] Weekly re-check of recent games for ESPN stat corrections (`refresh_stats.py`)
 - [x] Build the Streamlit dashboard (first version)
-- [ ] Cloudflare Tunnel to make the dashboard publicly reachable
+- [x] Make the dashboard publicly reachable (Tailscale Funnel, free; no custom domain)
+- [ ] Cloudflare Tunnel + own domain, if a nicer URL or login-protected access is ever wanted
 
 ## Dev Tools
 
