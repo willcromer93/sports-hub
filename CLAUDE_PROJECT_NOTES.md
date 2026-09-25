@@ -286,3 +286,24 @@ Since the goal is for me to learn, please:
 0 5 * * 0 cd ~/sports-hub/scripts && ~/sports-hub/venv/bin/python refresh_stats.py >> ~/sports-hub/logs/refresh.log 2>&1
 ```
 
+### 2026-09-24 (continued) — Season and career totals
+
+- **Schema problem found:** the rollup tables predated the games redesign. They had no `season_type`, so preseason, regular-season and playoff numbers would have been mixed together, and `player_season_stats.season` was text while `games.season_year` is an integer.
+- **Fix — `sql/stat_rollups_season_type.sql`:** adds `season_type` to both tables, renames and retypes `season` → `season_year integer`, and swaps the unique keys to include `season_type`. Tested twice on a throwaway schema copy before applying locally.
+- **`db.py` → `rebuild_stat_rollups()`:**
+  - Two `INSERT ... SELECT ... GROUP BY` queries (SUM / AVG / MAX / COUNT).
+  - Full rebuild inside one transaction rather than an upsert, so a corrected or removed stat can't leave a stale total.
+  - The season `team_id` comes from the tracked team in each game, not `players.team_id` (which can be stale).
+- **Additive stats only:**
+  - `NON_ADDITIVE_STAT_PATTERN` excludes percentages, per-attempt averages, QB ratings and "long" plays. Checked against every stat name from all 4 sports: 17 excluded, 99 kept.
+  - Season rates should be recomputed from totals (e.g. save % = saves / shotsAgainst). QBR can't be.
+- **Called from:** the end of `api_pulls.py` (nightly), and `refresh_stats.py` whenever a box score changed.
+- **Verified locally:**
+  - 1,436 season and career rows.
+  - All 1,436 season totals, game counts and maxes match a direct re-aggregation of the box scores (0 mismatches), and none are missing.
+  - 0 non-additive stats in the rollups. Career totals = season totals (only one season of data so far).
+  - Reruns give the same counts.
+  - Sample: Jonathan Taylor — 2 games, 190 rushing yards, 95.0/game, best game 98.
+
+**Pi deploy now needs 4 migrations, in order:** `phase2_games_schema.sql` → `teams_is_tracked.sql` → `games_season_type.sql` → `stat_rollups_season_type.sql`.
+

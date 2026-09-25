@@ -19,6 +19,9 @@ The Pi has not been re-verified since the 2026-08-30 migration.*
 3. `sql/teams_is_tracked.sql`: adds `espn_id`/`is_tracked` to `teams`, makes
    `external_id` nullable, and backfills the four tracked teams. Safe to rerun.
 4. `sql/games_season_type.sql`: adds `season_type` to `games`. Safe to rerun.
+5. `sql/stat_rollups_season_type.sql`: adds `season_type` to both rollup
+   tables and changes `player_season_stats.season` (text) to `season_year`
+   (integer). Safe to rerun.
 
 ### teams
 One row per team, across all four leagues — our four tracked teams plus
@@ -224,25 +227,43 @@ minimal row (team, league, ESPN ID, name) via `upsert_box_score_player()`;
 existing players are never modified by the box score pull.
 
 ### player_season_stats / player_career_stats
-Pre-aggregated rollups, one row per player per stat (per season, or
-all-time). Not yet populated — depends on `player_game_stats` being
-populated first.
+Pre-aggregated rollups of `player_game_stats`, one row per player per stat
+per season type (per season, or across all seasons). Rebuilt from scratch by
+`rebuild_stat_rollups()` in `db.py` at the end of every nightly run, and by
+the weekly refresh whenever it corrects a box score. A full rebuild (delete +
+insert in one transaction) rather than an upsert, so a corrected or removed
+stat can't leave a stale total behind.
 
 | Column         | Type        | Notes                                   |
 |----------------|-------------|-----------------------------------------|
 | season_stat_id / career_stat_id | SERIAL PK |                          |
 | player_id      | INTEGER FK  | references players                      |
-| team_id        | INTEGER FK  | season table only; references teams     |
-| season         | TEXT        | season table only                       |
+| team_id        | INTEGER FK  | season table only — the tracked team in those games (not `players.team_id`, which is the current team) |
+| season_year    | INTEGER     | season table only — same meaning as `games.season_year` |
+| season_type    | TEXT        | preseason / regular / postseason — never mixed together |
 | stat_name      | TEXT        |                                         |
-| games_played   | INTEGER     |                                         |
-| total_value    | NUMERIC     |                                         |
-| avg_value      | NUMERIC     |                                         |
-| max_value      | NUMERIC     |                                         |
+| games_played   | INTEGER     | games **this stat** was recorded for the player (per stat, not per player) |
+| total_value    | NUMERIC     | SUM                                     |
+| avg_value      | NUMERIC     | AVG per game played (unrounded)         |
+| max_value      | NUMERIC     | best single game                        |
 | updated_at     | TIMESTAMPTZ | defaults to now()                       |
 
-Unique on (player_id, team_id, season, stat_name) for season stats;
-(player_id, stat_name) for career stats.
+Unique on (player_id, team_id, season_year, season_type, stat_name) for
+season stats; (player_id, season_type, stat_name) for career stats.
+
+**Only additive stats are rolled up.** Percentages, per-attempt averages,
+ratings, and "longest" plays can't be summed, so they're left out — matched
+by `NON_ADDITIVE_STAT_PATTERN` in `db.py` on the stat name after any NFL
+category prefix (e.g. `savePct`, `faceoffPercent`, `rushing.yardsPerRushAttempt`,
+`punting.grossAvgPuntYards`, `passing.QBRating`, `passing.adjQBR`,
+`receiving.longReception`). Compute season versions from the totals
+instead — e.g. save % = `saves` / `shotsAgainst`, FG% = `fieldGoalsMade` /
+`fieldGoalsAttempted`, yards per carry = `rushing.rushingYards` /
+`rushing.rushingAttempts` — and season longs as `MAX(stat_value)` from
+`player_game_stats`. QBR/adjQBR can't be recomputed from box score data.
+
+**"Career" means every game in this database** — our tracked teams since
+data collection started (2026) — not a player's full professional career.
 
 ## Design decisions
 

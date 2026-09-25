@@ -11,6 +11,7 @@ from db import (
     insert_game_periods,
     insert_player,
     insert_team,
+    rebuild_stat_rollups,
     upsert_opponent_team,
 )
 from dotenv import load_dotenv
@@ -538,5 +539,9 @@ print(f"Games with periods filled in: {periods_filled}")
 # --- Player box scores (ESPN per-game summaries) ---
 box_scores_filled = pull_box_scores(conn)
 print(f"Games with box scores filled in: {box_scores_filled}")
+
+# --- Season/career rollups (rebuilt from player_game_stats) ---
+season_rows, career_rows = rebuild_stat_rollups(conn)
+print(f"Rollups rebuilt: {season_rows} season rows, {career_rows} career rows")
 
 conn.close()

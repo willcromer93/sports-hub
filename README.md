@@ -24,7 +24,8 @@ SPORTS-HUB/
 │ ├── schema.sql # Phase 1 schema — currently a Markdown snapshot, not runnable SQL (to be replaced)
 │ ├── phase2_games_schema.sql # Phase 2 DDL: games, game_periods, sport_period_labels (+ seeds), game_id FKs
 │ ├── teams_is_tracked.sql # Adds espn_id + is_tracked to teams so opponents can be stored
-│ └── games_season_type.sql # Adds season_type (preseason/regular/postseason) to games
+│ ├── games_season_type.sql # Adds season_type (preseason/regular/postseason) to games
+│ └── stat_rollups_season_type.sql # Adds season_type to season/career rollups; season -> season_year
 ├── venv/ # Python virtual environment (not tracked in git)
 ├── .env # API keys + DB credentials (not tracked in git)
 ├── Schema.md # Current database schema documentation (9 tables)
@@ -81,6 +82,7 @@ Requires a local Postgres instance (this project uses Postgres.app on macOS) wit
 psql -h localhost -d sports_hub -f sql/phase2_games_schema.sql
 psql -h localhost -d sports_hub -f sql/teams_is_tracked.sql
 psql -h localhost -d sports_hub -f sql/games_season_type.sql
+psql -h localhost -d sports_hub -f sql/stat_rollups_season_type.sql
 ```
 
 ## Scripts
@@ -112,7 +114,8 @@ Pulls team and player data for all four teams and loads it into Postgres. **Safe
 4. Pulls each team's preseason, regular-season, and postseason schedules from ESPN (`.../teams/{team_id}/schedule?seasontype=1|2|3`) and upserts every game into `games`. Each opponent is upserted into `teams` first (as an untracked team) so the game's home/away team IDs have a row to point at. Reruns refresh status, scores, and schedule changes in place.
 5. For every final game that doesn't have per-period scores yet, calls ESPN's `summary?event={id}` endpoint and fills in `game_periods` (regulation, overtime, and shootout rows). Only new finals are requested, so most nights this is a handful of calls.
 6. For every final game that doesn't have a box score yet, uses the same `summary` endpoint to fill in `player_game_appearances` (did play, seconds played) and `player_game_stats` (one row per stat) for our team's players.
-7. Closes the database connection.
+7. Rebuilds `player_season_stats` and `player_career_stats` from `player_game_stats` (additive stats only — see `Schema.md`).
+8. Closes the database connection.
 
 **Run it manually (local dev):**
 
@@ -156,7 +159,7 @@ python refresh_stats.py
 - [x] Add `season_type` to `games` and load preseason/postseason games
 - [x] Populate `game_periods` (per-period scores, including OT and shootouts)
 - [x] Populate `player_game_appearances` and `player_game_stats` (our teams' box scores)
-- [ ] Populate `player_season_stats` / `player_career_stats` rollups
+- [x] Populate `player_season_stats` / `player_career_stats` rollups
 - [ ] Add error handling for failed requests (non-200 responses, timeouts)
 - [ ] Add logging instead of print statements
 - [ ] Add a mechanism to detect players who've left a team's roster (current upsert-only pattern can't remove/flag departed players)
