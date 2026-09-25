@@ -505,3 +505,79 @@ def get_box_score(conn, game_id):
         for external_id, stat_name, stat_value in cur.fetchall():
             box_score[external_id]["stats"][stat_name] = float(stat_value)
     return box_score
+
+
+# Stats that can't be added up across games: percentages, per-attempt
+# averages, ratings, and "longest" plays (e.g. savePct, yardsPerRushAttempt,
+# QBRating, longRushing). They're matched on the part of the stat name after
+# any NFL category prefix ("rushing.longRushing" -> "longRushing") and left
+# out of the season/career rollups. Season versions of the rates can be
+# recomputed from the totals instead (season savePct = saves / shotsAgainst);
+# season "longest" values are MAX(stat_value) straight from player_game_stats.
+NON_ADDITIVE_STAT_PATTERN = r"(Pct|Percent|Avg|QBR|QBRating)|^yardsPer|^long"
+
+# SQL condition shared by both rollups: keep only additive stats.
+_ADDITIVE_STATS_ONLY = r"regexp_replace(s.stat_name, '^.*\.', '') !~ %(non_additive)s"
+
+
+def rebuild_stat_rollups(conn):
+    """
+    Recompute player_season_stats and player_career_stats from
+    player_game_stats. Both are rebuilt from scratch (delete + insert)
+    rather than upserted, so a stat corrected or removed by the weekly
+    refresh can't leave a stale total behind. The data is small enough that
+    a full rebuild takes well under a second. Done in one transaction, so
+    anything reading the tables never sees them half-built.
+
+    games_played is per stat: the number of games that stat was recorded
+    for the player (e.g. an NFL receiver's passing stats only count games
+    where he threw a pass). "Career" means every game in our database —
+    our tracked teams since data collection began — not a player's full career.
+
+    Returns (season_rows, career_rows).
+    """
+    params = {"non_additive": NON_ADDITIVE_STAT_PATTERN}
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM player_season_stats;")
+        cur.execute(
+            f"""
+            INSERT INTO player_season_stats (
+                player_id, team_id, season_year, season_type, stat_name,
+                games_played, total_value, avg_value, max_value
+            )
+            SELECT s.player_id, t.team_id, g.season_year, g.season_type, s.stat_name,
+                   COUNT(*), SUM(s.stat_value), AVG(s.stat_value), MAX(s.stat_value)
+            FROM player_game_stats s
+            JOIN games g ON g.game_id = s.game_id
+            -- The team the player played for is the tracked team in that
+            -- game (box scores only store our teams' players), not
+            -- players.team_id, which is their current team and can go stale.
+            JOIN teams t
+              ON t.team_id IN (g.home_team_id, g.away_team_id)
+             AND t.is_tracked
+            WHERE {_ADDITIVE_STATS_ONLY}
+            GROUP BY s.player_id, t.team_id, g.season_year, g.season_type, s.stat_name;
+            """,
+            params,
+        )
+        season_rows = cur.rowcount
+
+        cur.execute("DELETE FROM player_career_stats;")
+        cur.execute(
+            f"""
+            INSERT INTO player_career_stats (
+                player_id, season_type, stat_name,
+                games_played, total_value, avg_value, max_value
+            )
+            SELECT s.player_id, g.season_type, s.stat_name,
+                   COUNT(*), SUM(s.stat_value), AVG(s.stat_value), MAX(s.stat_value)
+            FROM player_game_stats s
+            JOIN games g ON g.game_id = s.game_id
+            WHERE {_ADDITIVE_STATS_ONLY}
+            GROUP BY s.player_id, g.season_type, s.stat_name;
+            """,
+            params,
+        )
+        career_rows = cur.rowcount
+    conn.commit()
+    return season_rows, career_rows

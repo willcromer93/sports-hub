@@ -22,6 +22,7 @@ from db import (
     get_recent_final_games,
     insert_box_score,
     insert_game_periods,
+    rebuild_stat_rollups,
 )
 from espn import fetch_summary, parse_periods, parse_team_box_score
 
@@ -108,6 +109,11 @@ for game_id, league, external_id, regulation_periods, team_id, espn_id in games:
 
     if not game_changed:
         unchanged += 1
+
+# Season/career totals are built from box scores, so rebuild them if any changed
+if box_scores_updated:
+    season_rows, career_rows = rebuild_stat_rollups(conn)
+    print(f"Rollups rebuilt: {season_rows} season rows, {career_rows} career rows")
 
 print(
     f"Done: {periods_updated} games had period score changes, "
