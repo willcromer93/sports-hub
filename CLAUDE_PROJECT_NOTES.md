@@ -31,7 +31,7 @@ This file exists so that any Claude conversation about this project starts with 
   SPORTS-HUB/
   ├── dashboard/       # visualization layer
   ├── scripts/         # Python scripts (e.g. api_pulls.py)
-  ├── sql/             # SQL scripts/queries (schema.sql lives here)
+  ├── sql/             # SQL scripts (schema.sql, phase2_games_schema.sql)
   ├── venv/            # virtual environment
   ├── .env             # API keys + DB credentials (not shared/committed)
   ├── .gitignore
@@ -39,10 +39,13 @@ This file exists so that any Claude conversation about this project starts with 
   └── .vscode/
       └── settings.json
   ```
-- **Database:** PostgreSQL (Postgres.app on macOS), database name `sports_hub`, connected via SQLTools in VS Code. Full 7-table schema applied — see `SCHEMA.md` for table layout and reasoning.
+- **Database:** PostgreSQL (Postgres.app on macOS), database name `sports_hub`, connected via SQLTools in VS Code. Production database lives on the Pi (see README); the Mac holds a local dev copy. 9 tables — see `Schema.md` for table layout, reasoning, and build order.
 - **Tools already set up:** Python, Pylance, Black (formatter), Ruff (linter), SQLTools + Postgres driver, python-dotenv for API keys.
 - **APIs in use:**
   - **ESPN hidden API** (`site.api.espn.com`) — used for Colts team info, and now the primary source for *all* player roster data (Pacers, Purdue, Red Wings, Colts — all four teams complete as of 2026-08-29).
+  - **balldontlie.io** — team identity for Pacers and Purdue.
+  - **NHL Web API** (`api-web.nhle.com`) — team identity for the Red Wings.
+
 ## A standing ask
 
 Since the goal is for me to learn, please:
@@ -52,7 +55,7 @@ Since the goal is for me to learn, please:
 
 ## Progress Log
 
-*(Newest entries at the bottom. This is a running diary of what was done and why — for full schema reasoning, see `SCHEMA.md`, which stays updated to reflect current structure rather than history.)*
+*(Newest entries at the bottom. This is a running diary of what was done and why — for full schema reasoning, see `Schema.md`, which stays updated to reflect current structure rather than history.)*
 
 ### 2026-07-29
 - Installed Postgres (Postgres.app on macOS). Located `psql` at
@@ -165,3 +168,25 @@ Since the goal is for me to learn, please:
 6. Cloudflare Tunnel to make the dashboard public — not started.
 
 **Next up:** back to data pipeline work — populating the `games` table (schedules, scores) across all four sports, likely the next full session's focus.
+
+### 2026-09-24 — Schema audit, Phase 2 games DDL captured
+
+**Schema audit (local Mac database — the Pi was off, not re-verified):**
+- Compared `information_schema` against the docs. The database has **9 tables**, not 7: `game_periods` (per-period box-score line) and `sport_period_labels` (4 seed rows: NBA Quarter/4, NCAAB Half/2, NHL Period/3, NFL Quarter/4) had been added without being documented.
+- `games` had already been redesigned to a home/away layout (`home_team_id`/`away_team_id` both referencing `teams`, `season_year`, `game_time` timestamptz, `status` limited to scheduled/in_progress/final/postponed/canceled, unique on `(league, external_id)`). No doc described it, and the SQL that created it wasn't saved anywhere.
+- Other drift fixed in `Schema.md`: `teams` enrichment columns were missing; `height_inches`/`weight_lbs` are `numeric`, not integer.
+- Found that `sql/schema.sql` is a Markdown copy of the schema docs, not runnable SQL — still to be fixed.
+- Found that the **local** database still has the orphaned duplicate Colts row (`team_id` 4, `external_id` `'ind'`, 4 players) that was cleaned up only on the Pi on 2026-08-30. Local is 5 teams / 162 players; the Pi should be 4 / 162. Local Postgres is 18.6 (the Pi is 17).
+
+**Phase 2 DDL captured:**
+- Wrote `sql/phase2_games_schema.sql`: creates `games` → `game_periods` → `sport_period_labels` (+ seeds), then adds the `game_id` foreign keys on `player_game_stats`/`player_game_appearances`. Idempotent (`IF NOT EXISTS`, `ON CONFLICT DO NOTHING`, a `DO` block checking `pg_constraint` for the FKs) and wrapped in one transaction.
+- Tested on throwaway databases: a fresh build (run twice) matches the local schema line-for-line apart from one cosmetic NOT NULL constraint name (`games_id_not_null`, left over from the `id` → `game_id` rename). Running it against a copy of the existing schema changes nothing.
+- Refreshed `Schema.md` and the README to match.
+
+**Open design question:** `games.home_team_id`/`away_team_id` must both reference `teams`, which only holds our 4 teams, so opponents need rows in `teams` before any game can load.
+
+**Next up:**
+- Decide how to store opponents, then build the games pull.
+- When the Pi is back on: run the same `information_schema` check there, and apply `phase2_games_schema.sql` if `games` is still the old design.
+- Turn `sql/schema.sql` into real Phase 1 DDL.
+- Clean up the orphaned Colts row in the local database.
