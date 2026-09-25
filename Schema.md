@@ -265,8 +265,9 @@ Unique on (player_id, team_id, season, stat_name) for season stats;
   different ESPN endpoint to populate.
 - `teams.capacity` intentionally unpopulated.
 - `games.game_time` can't tell "time TBD" apart from a real start time.
-- `game_periods` and box scores are written once per game and never
-  refreshed, so a later ESPN stat correction wouldn't be picked up.
+- `game_periods` and box scores are written once per game by the nightly
+  pull, then re-checked weekly by `refresh_stats.py` for 14 days after the
+  game. A correction ESPN makes after that window isn't picked up.
 - Box scores cover our tracked teams only, not opponents.
 - `player_season_stats` / `player_career_stats` exist but have no data yet.
 - `sql/schema.sql` is currently a Markdown snapshot, not runnable SQL — the

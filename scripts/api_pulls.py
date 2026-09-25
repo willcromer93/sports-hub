@@ -2,6 +2,7 @@ import os
 
 import requests
 from db import (
+    box_score_rows,
     get_connection,
     get_games_missing_box_scores,
     get_games_missing_periods,
@@ -10,10 +11,10 @@ from db import (
     insert_game_periods,
     insert_player,
     insert_team,
-    upsert_box_score_player,
     upsert_opponent_team,
 )
 from dotenv import load_dotenv
+from espn import fetch_summary, parse_periods, parse_team_box_score
 
 # --- Load API key from .env ---
 load_dotenv()
@@ -161,35 +162,7 @@ def pull_games(conn, league, sport_path, espn_team_id, our_team_id):
     return game_count
 
 
-def extract_linescores(competitor):
-    """ESPN's per-period scores for one team, as a list of ints in order:
-    regulation periods first, then any overtimes, then a shootout (NHL)."""
-    return [
-        int(float(line["displayValue"])) for line in competitor.get("linescores", [])
-    ]
-
-
-def build_periods(home_lines, away_lines, regulation_periods, is_shootout):
-    """Turn two lists of per-period scores into game_periods rows of
-    (period_number, period_type, home_score, away_score).
-    Numbering restarts for each type: regulation 1..N, overtime 1..k,
-    shootout 1 — so NBA double overtime is ('overtime', 1) and ('overtime', 2).
-    ESPN doesn't label which entry is which, so it's worked out from the
-    league's regulation period count (from sport_period_labels) and, for
-    hockey, whether the game ended in a shootout (always the last entry)."""
-    periods = []
-    last_index = len(home_lines) - 1
-    for index, (home, away) in enumerate(zip(home_lines, away_lines)):
-        if index < regulation_periods:
-            periods.append((index + 1, "regulation", home, away))
-        elif is_shootout and index == last_index:
-            periods.append((1, "shootout", home, away))
-        else:
-            periods.append((index - regulation_periods + 1, "overtime", home, away))
-    return periods
-
-
-def pull_game_periods(conn, sport_paths):
+def pull_game_periods(conn):
     """Fill in game_periods for every final game that doesn't have them yet.
     Uses ESPN's per-game summary endpoint (the schedule endpoint has no
     per-period scores) — one request per game, but only for games not
@@ -199,104 +172,19 @@ def pull_game_periods(conn, sport_paths):
     for game_id, league, external_id, regulation_periods in get_games_missing_periods(
         conn
     ):
-        response = requests.get(
-            f"https://site.api.espn.com/apis/site/v2/sports/{sport_paths[league]}/summary",
-            params={"event": external_id},
-        )
-        competition = response.json()["header"]["competitions"][0]
-        lines = {
-            c["homeAway"]: extract_linescores(c) for c in competition["competitors"]
-        }
-
-        home_lines = lines.get("home", [])
-        away_lines = lines.get("away", [])
-        if not home_lines or len(home_lines) != len(away_lines):
+        periods = parse_periods(fetch_summary(league, external_id), regulation_periods)
+        if periods is None:
             print(
                 f"  No usable period scores for {league} game {external_id}, skipping"
             )
             continue
-
-        is_shootout = "/SO" in competition["status"]["type"].get("detail", "")
-        periods = build_periods(home_lines, away_lines, regulation_periods, is_shootout)
         insert_game_periods(conn, game_id, periods)
         filled += 1
 
     return filled
 
 
-# Box score keys that hold playing time. They go into
-# player_game_appearances.seconds_played rather than player_game_stats.
-PLAYING_TIME_KEYS = {"minutes", "timeOnIce"}
-
-# NFL box scores are split into stat categories (passing, rushing, defensive, ...)
-# that reuse key names with different meanings — "interceptions" is thrown under
-# passing but caught under defensive — so NFL stat names get the category as a
-# prefix, e.g. "passing.interceptions". NHL groups are positions (forwards,
-# goalies), and a player is only ever in one, so no prefix is needed there.
-STAT_GROUP_PREFIX_LEAGUES = {"NFL"}
-
-
-def parse_stat_value(raw):
-    """Convert one box score value to a number.
-    '14' -> 14.0, '+6' -> 6.0, '.923' -> 0.923, '12:50' -> 770 (seconds).
-    Returns None for blanks like '--' or ''."""
-    if ":" in raw:
-        minutes, seconds = raw.split(":")
-        return int(minutes) * 60 + int(seconds)
-    try:
-        return float(raw)
-    except ValueError:
-        return None
-
-
-def parse_box_score(team_box, league):
-    """Flatten one team's ESPN box score into
-    {espn_athlete_id: {"name", "did_play", "seconds_played", "stats"}}.
-    A player can appear in several stat groups (an NFL running back is under
-    both rushing and receiving), so their stats are merged into one entry."""
-    players = {}
-    for group in team_box.get("statistics", []):
-        prefix = f"{group['name']}." if league in STAT_GROUP_PREFIX_LEAGUES else ""
-        for entry in group.get("athletes", []):
-            athlete = entry["athlete"]
-            player = players.setdefault(
-                athlete["id"],
-                {
-                    "name": athlete["displayName"],
-                    # Only basketball marks DNPs; for other sports everyone listed played
-                    "did_play": not entry.get("didNotPlay"),
-                    "seconds_played": None,
-                    "stats": {},
-                },
-            )
-            for key, raw in zip(group["keys"], entry.get("stats", [])):
-                if key in PLAYING_TIME_KEYS:
-                    value = parse_stat_value(raw)
-                    if value is not None:
-                        # Basketball gives whole minutes; hockey's MM:SS is already seconds
-                        seconds = value * 60 if key == "minutes" else value
-                        player["seconds_played"] = int(seconds)
-                    continue
-                if key.startswith("ytd"):  # season-to-date totals, not this game
-                    continue
-
-                # Paired stats like "fieldGoalsMade-fieldGoalsAttempted": "6-10"
-                # or "completions/passingAttempts": "19/31" become two stats.
-                names, values = [key], [raw]
-                for separator in ("/", "-"):
-                    if separator in key:
-                        names, values = key.split(separator), raw.split(separator)
-                        break
-                if len(names) != len(values):
-                    continue
-                for name, value in zip(names, values):
-                    number = parse_stat_value(value)
-                    if number is not None:
-                        player["stats"][prefix + name] = number
-    return players
-
-
-def pull_box_scores(conn, sport_paths):
+def pull_box_scores(conn):
     """Fill in player_game_appearances and player_game_stats for our team in
     every final game that doesn't have a box score yet, from ESPN's per-game
     summary endpoint. Only the tracked team's players are stored — opponents'
@@ -309,31 +197,14 @@ def pull_box_scores(conn, sport_paths):
         our_team_id,
         our_espn_id,
     ) in get_games_missing_box_scores(conn):
-        response = requests.get(
-            f"https://site.api.espn.com/apis/site/v2/sports/{sport_paths[league]}/summary",
-            params={"event": external_id},
-        )
-        team_boxes = response.json().get("boxscore", {}).get("players", [])
-        team_box = next((t for t in team_boxes if t["team"]["id"] == our_espn_id), None)
-        parsed = parse_box_score(team_box, league) if team_box else {}
+        summary = fetch_summary(league, external_id)
+        parsed = parse_team_box_score(summary, our_espn_id, league)
         if not parsed:
             print(f"  No box score for {league} game {external_id}, skipping")
             continue
-
-        box_score = []
-        for espn_athlete_id, player in parsed.items():
-            player_id = upsert_box_score_player(
-                conn, our_team_id, league, espn_athlete_id, player["name"]
-            )
-            box_score.append(
-                (
-                    player_id,
-                    player["did_play"],
-                    player["seconds_played"],
-                    player["stats"],
-                )
-            )
-        insert_box_score(conn, game_id, box_score)
+        insert_box_score(
+            conn, game_id, box_score_rows(conn, our_team_id, league, parsed)
+        )
         filled += 1
 
     return filled
@@ -661,12 +532,11 @@ for label, league, sport_path, espn_team_id, our_team_id in tracked_teams:
 
 # --- Game periods (ESPN per-game summaries) ---
 # Runs after the games pull, so games that just went final get their periods.
-sport_paths = {league: sport_path for _, league, sport_path, _, _ in tracked_teams}
-periods_filled = pull_game_periods(conn, sport_paths)
+periods_filled = pull_game_periods(conn)
 print(f"Games with periods filled in: {periods_filled}")
 
 # --- Player box scores (ESPN per-game summaries) ---
-box_scores_filled = pull_box_scores(conn, sport_paths)
+box_scores_filled = pull_box_scores(conn)
 print(f"Games with box scores filled in: {box_scores_filled}")
 
 conn.close()

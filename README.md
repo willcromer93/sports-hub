@@ -16,8 +16,10 @@ The setup instructions below are for a **local development copy** (e.g. for test
 SPORTS-HUB/
 ├── dashboard/ # Dashboard/visualization layer (not started yet — blocked on games table)
 ├── scripts/
-│ ├── api_pulls.py # Pulls team + player data from external sports APIs, upserts into Postgres
-│ └── db.py # Database connection + insert functions (get_connection, insert_team, upsert_opponent_team, insert_player)
+│ ├── api_pulls.py # Nightly: pulls teams, rosters, schedules, period scores, and box scores into Postgres
+│ ├── refresh_stats.py # Weekly: re-checks recent games for ESPN stat corrections, rewrites only what changed
+│ ├── espn.py # Shared ESPN game-summary helpers (fetch, parse line scores + box scores); no DB access
+│ └── db.py # Database connection + insert/read functions
 ├── sql/
 │ ├── schema.sql # Phase 1 schema — currently a Markdown snapshot, not runnable SQL (to be replaced)
 │ ├── phase2_games_schema.sql # Phase 2 DDL: games, game_periods, sport_period_labels (+ seeds), game_id FKs
@@ -121,6 +123,17 @@ python api_pulls.py
 
 **In production**, this runs automatically nightly at 4:00 AM via `cron` on the Pi — check `~/sports-hub/logs/pipeline.log` on the Pi for run history.
 
+### `scripts/refresh_stats.py`
+
+Weekly check for ESPN stat corrections. The nightly pull fills in each game's period scores and box score once; ESPN sometimes corrects stats days later. This script re-fetches every final game from the last 14 days (`LOOKBACK_DAYS`), compares ESPN's current numbers to what's stored, and rewrites a game's periods or box score **only if something changed**, printing exactly what changed (e.g. `Jonathan Taylor rushing.rushingYards: 90.0 -> 98.0`). If ESPN returns an empty box score or line score, the stored data is left alone. Game scores/status aren't part of this — the nightly schedule pull already refreshes them.
+
+```bash
+cd scripts
+python refresh_stats.py
+```
+
+**In production**, meant to run weekly via `cron` on the Pi (Sundays at 5:00 AM, after the nightly run), logging to `~/sports-hub/logs/refresh.log`.
+
 ## API Notes
 
 - **balldontlie.io** — requires an `Authorization` header with your API key. Used for NBA/NCAAB team identity only (kept stable/unchanged from original inserts — see note below). Its `/players` endpoint returns historically-associated players rather than current roster, and its `/players/active` endpoint (which would fix that) requires a paid tier — so player rosters are pulled from ESPN instead.
@@ -147,7 +160,8 @@ python api_pulls.py
 - [ ] Add error handling for failed requests (non-200 responses, timeouts)
 - [ ] Add logging instead of print statements
 - [ ] Add a mechanism to detect players who've left a team's roster (current upsert-only pattern can't remove/flag departed players)
-- [ ] Build the Streamlit dashboard (blocked on `games` table)
+- [x] Weekly re-check of recent games for ESPN stat corrections (`refresh_stats.py`)
+- [ ] Build the Streamlit dashboard
 - [ ] Cloudflare Tunnel to make the dashboard publicly reachable
 
 ## Dev Tools

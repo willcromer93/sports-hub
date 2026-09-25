@@ -264,3 +264,25 @@ Since the goal is for me to learn, please:
 
 **Next up:** season/career rollups from `player_game_stats` (a SQL `INSERT ... SELECT ... GROUP BY`) — sum counting stats, but recompute rates/percentages rather than summing them.
 
+### 2026-09-24 (continued) — Weekly stat-correction refresh
+
+- **Goal:** pick up ESPN stat corrections after a game, but only write to the database when something actually changed.
+- **Refactor:** moved the ESPN summary parsing (`build_periods`, `parse_box_score`, etc.) out of `api_pulls.py` into a new `scripts/espn.py`, plus `fetch_summary()`, `parse_periods()`, `parse_team_box_score()` and a single `SPORT_PATHS` map. Reason: `api_pulls.py` runs top to bottom on import, so another script couldn't reuse its functions without re-running the whole nightly pull.
+- **`db.py`:**
+  - Read functions `get_recent_final_games()`, `get_game_periods()` and `get_box_score()`. They return the same shapes the ESPN parsers produce, so stored and fresh data compare directly.
+  - `insert_game_periods()` / `insert_box_score()` gained `replace=True`, which deletes the game's rows and reinserts them in the same transaction, so a stat ESPN removed doesn't linger.
+  - New `box_score_rows()` (shared player-id lookup).
+- **`scripts/refresh_stats.py`:**
+  - Re-fetches final games from the last 14 days (`LOOKBACK_DAYS`; a weekly run checks each game twice).
+  - Compares ESPN's periods and box score to what's stored, and rewrites only on a difference, logging each change.
+  - Skips (never writes) if ESPN returns empty data, so an ESPN glitch can't wipe good rows.
+- **Verified locally:**
+  - The nightly pipeline after the refactor made identical data (same row counts and checksum; 0 new periods/box scores).
+  - The refresh on untouched data found 0 changes across 5 games.
+  - Simulated corrections: changed a rushing total, added a fake stat, deleted a player's whole box score line, and changed an NHL period score. The refresh caught all 4, restored the data to an exact checksum match, and the next run found 0 changes.
+
+**Pi cron — add when the Pi is back** (`crontab -e`). Mirror the existing nightly line's paths, run Sundays at 5 AM, and **keep a trailing newline** (the silent-failure gotcha from 2026-08-30):
+```
+0 5 * * 0 cd ~/sports-hub/scripts && ~/sports-hub/venv/bin/python refresh_stats.py >> ~/sports-hub/logs/refresh.log 2>&1
+```
+
