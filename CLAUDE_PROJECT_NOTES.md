@@ -243,3 +243,24 @@ Since the goal is for me to learn, please:
 
 **Next up:** player box scores (`player_game_appearances`/`player_game_stats`) — the same `summary` response has a `boxscore` section.
 
+### 2026-09-24 (continued) — Player box scores
+
+- **`db.py`:**
+  - `get_games_missing_box_scores()` finds final games with no appearance rows, plus the tracked team in each.
+  - `upsert_box_score_player()` gets a `player_id`, adding a minimal row for anyone not already in `players`. It uses the `ON CONFLICT DO UPDATE SET name = players.name` trick, because `DO NOTHING` doesn't return the id.
+  - `insert_box_score()` writes appearances and stats with a single commit per game.
+- **`api_pulls.py`:** `parse_box_score()` flattens ESPN's box score, and `pull_box_scores()` covers only our team's side of each game.
+- **ESPN box score quirks:**
+  - Basketball has one stat group per team; NHL groups by position (forwards/defenses/goalies); NFL groups by stat category (passing/rushing/defensive/...).
+  - Paired stats are strings like `"6-10"` / `"19/31"`.
+  - NBA minutes are whole numbers (`"17"`) and NHL time on ice is `"12:50"`.
+  - Only basketball lists DNPs (`didNotPlay`).
+  - NFL reuses key names across categories — `interceptions` (thrown vs. caught), `sacks` (taken vs. made) — hence the `category.` prefix for NFL.
+- **Tested the parser first** on 7 of last season's games:
+  - NBA and NCAAB player points summed to the final score. Minutes summed to exactly 240 (regulation), 290 (NBA 2OT) and 225 (NCAAB OT).
+  - NFL rushing yards matched ESPN's team totals.
+  - NHL player goals matched in an OT game; in a shootout win they're 1 short, because the shootout goal isn't credited to a player.
+- **Verified locally:** 2 pipeline runs (exit 0 both). 8 final games → 265 appearances and 2,725 stat rows. The second run added nothing. Every box score player was already in `players` (the upsert-only roster pull had kept the preseason cuts), so there were 0 new player rows. Red Wings player goals match their final scores in all 3 preseason games.
+
+**Next up:** season/career rollups from `player_game_stats` (a SQL `INSERT ... SELECT ... GROUP BY`) — sum counting stats, but recompute rates/percentages rather than summing them.
+

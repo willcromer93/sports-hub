@@ -109,7 +109,8 @@ Pulls team and player data for all four teams and loads it into Postgres. **Safe
 3. Pulls full player rosters for all four teams from ESPN's roster endpoint (`site.api.espn.com/apis/site/v2/sports/{sport}/{league}/teams/{team_id}/roster`) and upserts into `players`, including physical stats, birth info, college, contract summary (current season + total value/years/expiration), injury status, and headshot URL.
 4. Pulls each team's preseason, regular-season, and postseason schedules from ESPN (`.../teams/{team_id}/schedule?seasontype=1|2|3`) and upserts every game into `games`. Each opponent is upserted into `teams` first (as an untracked team) so the game's home/away team IDs have a row to point at. Reruns refresh status, scores, and schedule changes in place.
 5. For every final game that doesn't have per-period scores yet, calls ESPN's `summary?event={id}` endpoint and fills in `game_periods` (regulation, overtime, and shootout rows). Only new finals are requested, so most nights this is a handful of calls.
-6. Closes the database connection.
+6. For every final game that doesn't have a box score yet, uses the same `summary` endpoint to fill in `player_game_appearances` (did play, seconds played) and `player_game_stats` (one row per stat) for our team's players.
+7. Closes the database connection.
 
 **Run it manually (local dev):**
 
@@ -141,7 +142,8 @@ python api_pulls.py
 - [x] Populate `games` (regular-season schedules + final scores, all four teams)
 - [x] Add `season_type` to `games` and load preseason/postseason games
 - [x] Populate `game_periods` (per-period scores, including OT and shootouts)
-- [ ] Populate `player_game_appearances`, `player_game_stats`, and the season/career rollups
+- [x] Populate `player_game_appearances` and `player_game_stats` (our teams' box scores)
+- [ ] Populate `player_season_stats` / `player_career_stats` rollups
 - [ ] Add error handling for failed requests (non-200 responses, timeouts)
 - [ ] Add logging instead of print statements
 - [ ] Add a mechanism to detect players who've left a team's roster (current upsert-only pattern can't remove/flag departed players)

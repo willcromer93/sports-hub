@@ -162,6 +162,13 @@ told apart from "played and recorded a zero" — a player who didn't dress
 has no row at all, distinct from a player who played but had, say, zero
 rebounds.
 
+Filled in nightly for our tracked team (not opponents) in every final game
+that doesn't have rows yet, from ESPN's per-game `summary` box score.
+`did_play = false` only comes from basketball, where ESPN lists DNPs
+(e.g. coach's decision); NHL/NFL box scores only list players who played.
+NFL players who played without recording a stat (e.g. some special teams
+snaps) aren't in ESPN's box score, so they have no row.
+
 | Column         | Type       | Notes              |
 |----------------|------------|--------------------|
 | appearance_id  | SERIAL PK  |                    |
@@ -173,8 +180,9 @@ rebounds.
 Unique on (game_id, player_id).
 
 `seconds_played` is the canonical time column across sports:
-NBA stores whole minutes × 60, NHL stores exact seconds, NFL leaves this
-NULL (snap counts go into `player_game_stats` instead). Converting to a
+NBA/NCAAB store whole minutes × 60, NHL stores exact seconds (from MM:SS
+time on ice), NFL leaves this NULL (ESPN's box score has no playing time or
+snap counts). Converting to a
 display format like MM:SS happens in the Python/dashboard layer, not here.
 
 ### player_game_stats
@@ -188,10 +196,32 @@ queries (sums, averages across a season) simple regardless of sport.
 | stat_id    | SERIAL PK  |                                           |
 | game_id    | INTEGER FK | references games                          |
 | player_id  | INTEGER FK | references players                        |
-| stat_name  | TEXT       | e.g. 'points', 'goals', 'passing_yards'   |
+| stat_name  | TEXT       | ESPN's key, e.g. 'points', 'goals', 'passing.passingYards' |
 | stat_value | NUMERIC    |                                           |
 
 Unique on (game_id, player_id, stat_name).
+
+How ESPN's box score becomes rows (`parse_box_score()` in `api_pulls.py`):
+- **Names are ESPN's camelCase keys** (`rebounds`, `faceoffsWon`, `saves`).
+- **Paired stats are split:** `fieldGoalsMade-fieldGoalsAttempted` = `6-10`
+  becomes `fieldGoalsMade` 6 + `fieldGoalsAttempted` 10 (same for NFL `19/31`).
+- **NFL names are prefixed with their stat category** (`passing.interceptions`
+  vs. `interceptions.interceptions`, `passing.sacks` vs. `defensive.sacks`),
+  because ESPN reuses key names with different meanings across categories.
+- **Time stats are stored in seconds** (e.g. NHL `powerPlayTimeOnIce`). The
+  main playing-time key (`minutes`/`timeOnIce`) goes to
+  `player_game_appearances.seconds_played` instead, not here.
+- **Skipped:** blanks (`--`) and season-to-date keys (`ytdGoals`).
+- **Rates and percentages are stored as given** (`savePct` 0.923,
+  `yardsPerRushAttempt`, `QBRating`). Season rollups must recompute or
+  average these, never sum them.
+- In an NHL shootout, the extra goal credited to the winning team isn't a
+  player goal, so player `goals` sum to the team score minus 1 for a
+  shootout win.
+
+A box score player who isn't in `players` yet (e.g. a preseason cut) gets a
+minimal row (team, league, ESPN ID, name) via `upsert_box_score_player()`;
+existing players are never modified by the box score pull.
 
 ### player_season_stats / player_career_stats
 Pre-aggregated rollups, one row per player per stat (per season, or
@@ -235,8 +265,9 @@ Unique on (player_id, team_id, season, stat_name) for season stats;
   different ESPN endpoint to populate.
 - `teams.capacity` intentionally unpopulated.
 - `games.game_time` can't tell "time TBD" apart from a real start time.
-- `game_periods` rows are written once per game and never refreshed (fine
-  unless ESPN corrects a score afterward).
-- All player game/season/career stat tables exist but have no data yet.
+- `game_periods` and box scores are written once per game and never
+  refreshed, so a later ESPN stat correction wouldn't be picked up.
+- Box scores cover our tracked teams only, not opponents.
+- `player_season_stats` / `player_career_stats` exist but have no data yet.
 - `sql/schema.sql` is currently a Markdown snapshot, not runnable SQL — the
   Phase 1 tables can't yet be rebuilt from the repo alone.
