@@ -283,14 +283,18 @@ def get_games_missing_periods(conn):
         return cur.fetchall()
 
 
-def insert_game_periods(conn, game_id, periods):
+def insert_game_periods(conn, game_id, periods, replace=False):
     """
     Insert all of one game's period rows into game_periods.
     `periods` is a list of (period_number, period_type, home_score, away_score).
-    Upserts on (game_id, period_number, period_type). Commits once at the
-    end, so a game gets either all of its periods or none of them.
+    Upserts on (game_id, period_number, period_type). With replace=True, the
+    game's existing period rows are deleted first (used when ESPN corrects a
+    game). Commits once at the end, so a game gets either all of its periods
+    or none of them.
     """
     with conn.cursor() as cur:
+        if replace:
+            cur.execute("DELETE FROM game_periods WHERE game_id = %s;", (game_id,))
         for period_number, period_type, home_score, away_score in periods:
             cur.execute(
                 """
@@ -356,15 +360,39 @@ def upsert_box_score_player(conn, team_id, league, external_id, name):
     return player_id
 
 
-def insert_box_score(conn, game_id, box_score):
+def box_score_rows(conn, team_id, league, parsed):
+    """
+    Turn a parsed ESPN box score ({espn_athlete_id: {...}}, from
+    espn.parse_team_box_score) into the rows insert_box_score expects,
+    looking up (or adding) each player's player_id.
+    """
+    rows = []
+    for espn_athlete_id, player in parsed.items():
+        player_id = upsert_box_score_player(
+            conn, team_id, league, espn_athlete_id, player["name"]
+        )
+        rows.append(
+            (player_id, player["did_play"], player["seconds_played"], player["stats"])
+        )
+    return rows
+
+
+def insert_box_score(conn, game_id, box_score, replace=False):
     """
     Insert one game's box score for a team into player_game_appearances and
     player_game_stats. `box_score` is a list of
     (player_id, did_play, seconds_played, stats), where stats is a dict of
-    {stat_name: stat_value}. Upserts both tables. Commits once at the end,
-    so a game gets either its whole box score or none of it.
+    {stat_name: stat_value}. Upserts both tables. With replace=True, the
+    game's existing rows are deleted first, so a stat or player ESPN has
+    since removed doesn't linger. Commits once at the end, so a game gets
+    either its whole box score or none of it.
     """
     with conn.cursor() as cur:
+        if replace:
+            cur.execute("DELETE FROM player_game_stats WHERE game_id = %s;", (game_id,))
+            cur.execute(
+                "DELETE FROM player_game_appearances WHERE game_id = %s;", (game_id,)
+            )
         for player_id, did_play, seconds_played, stats in box_score:
             cur.execute(
                 """
@@ -392,3 +420,88 @@ def insert_box_score(conn, game_id, box_score):
                     (game_id, player_id, stat_name, stat_value),
                 )
     conn.commit()
+
+
+def get_recent_final_games(conn, days):
+    """
+    Final games played in the last `days` days — the ones the weekly refresh
+    re-checks for ESPN stat corrections. Returns a list of
+    (game_id, league, external_id, regulation_periods, team_id, espn_id),
+    where team_id/espn_id are for the tracked team that played in the game.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT g.game_id, g.league, g.external_id, l.regulation_periods,
+                   t.team_id, t.espn_id
+            FROM games g
+            JOIN sport_period_labels l ON l.league = g.league
+            JOIN teams t
+              ON t.team_id IN (g.home_team_id, g.away_team_id)
+             AND t.is_tracked
+            WHERE g.status = 'final'
+              AND g.game_time >= now() - make_interval(days => %s)
+            ORDER BY g.game_time;
+            """,
+            (days,),
+        )
+        return cur.fetchall()
+
+
+def get_game_periods(conn, game_id):
+    """
+    One game's stored period rows, as a list of
+    (period_number, period_type, home_score, away_score) — the same shape
+    espn.parse_periods returns, so the two can be compared directly.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT period_number, period_type, home_score, away_score
+            FROM game_periods
+            WHERE game_id = %s;
+            """,
+            (game_id,),
+        )
+        return cur.fetchall()
+
+
+def get_box_score(conn, game_id):
+    """
+    One game's stored box score, as
+    {espn_athlete_id: {"name", "did_play", "seconds_played", "stats"}} — the
+    same shape espn.parse_team_box_score returns, so the two can be compared
+    directly. Stat values come back from Postgres as Decimal, so they're
+    converted to float to match what's parsed from ESPN.
+    """
+    box_score = {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT p.external_id, p.name, a.did_play, a.seconds_played
+            FROM player_game_appearances a
+            JOIN players p ON p.player_id = a.player_id
+            WHERE a.game_id = %s;
+            """,
+            (game_id,),
+        )
+        for external_id, name, did_play, seconds_played in cur.fetchall():
+            box_score[external_id] = {
+                "name": name,
+                "did_play": did_play,
+                "seconds_played": seconds_played,
+                "stats": {},
+            }
+
+        cur.execute(
+            """
+            SELECT p.external_id, s.stat_name, s.stat_value
+            FROM player_game_stats s
+            JOIN players p ON p.player_id = s.player_id
+            WHERE s.game_id = %s;
+            """,
+            (game_id,),
+        )
+        for external_id, stat_name, stat_value in cur.fetchall():
+            box_score[external_id]["stats"][stat_name] = float(stat_value)
+    return box_score
