@@ -32,14 +32,15 @@ SPORTS-HUB/
 │ ├── api_pulls.py # Nightly: pulls teams, rosters, schedules, period scores, and box scores into Postgres
 │ ├── refresh_stats.py # Weekly: re-checks recent games for ESPN stat corrections, rewrites only what changed
 │ ├── espn.py # Shared ESPN game-summary helpers (fetch, parse line scores + box scores); no DB access
-│ └── db.py # Database connection + insert/read functions
+│ └── db.py # Database connections (read-write + read-only for the dashboard) + insert/read functions
 ├── sql/
 │ ├── schema.sql # Phase 1 schema — currently a Markdown snapshot, not runnable SQL (to be replaced)
 │ ├── phase2_games_schema.sql # Phase 2 DDL: games, game_periods, sport_period_labels (+ seeds), game_id FKs
 │ ├── teams_is_tracked.sql # Adds espn_id + is_tracked to teams so opponents can be stored
 │ ├── games_season_type.sql # Adds season_type (preseason/regular/postseason) to games
 │ ├── stat_rollups_season_type.sql # Adds season_type to season/career rollups; season -> season_year
-│ └── appearances_team_id.sql # Adds team_id to player_game_appearances so opponents' box scores can be stored
+│ ├── appearances_team_id.sql # Adds team_id to player_game_appearances so opponents' box scores can be stored
+│ └── dashboard_ro_role.sql # Creates the SELECT-only dashboard_ro Postgres role used by the public dashboard
 ├── venv/ # Python virtual environment (not tracked in git)
 ├── .env # API keys + DB credentials (not tracked in git)
 ├── Schema.md # Current database schema documentation (9 tables)
@@ -84,7 +85,7 @@ DB_PASSWORD=your_postgres_password
 
 - `BALLDONTLIE_KEY` is required for [balldontlie.io](https://www.balldontlie.io/) API calls (used for NBA/NCAAB team identity).
 - `DB_*` variables connect `scripts/db.py` to your local Postgres database.
-- `DASHBOARD_DB_USER` / `DASHBOARD_DB_PASSWORD` (optional) are a read-only role for the dashboard; create it with `sql/dashboard_ro_role.sql`.
+- `DASHBOARD_DB_USER` / `DASHBOARD_DB_PASSWORD` (optional locally, **required on the Pi**) are the read-only role the dashboard connects with. Create the role with `sql/dashboard_ro_role.sql`. Without them the dashboard falls back to the read-write `DB_*` credentials.
 
 ### 4. Database
 
@@ -107,7 +108,8 @@ psql -h localhost -d sports_hub -f sql/appearances_team_id.sql
 
 Holds the database connection and insert logic, using `psycopg2` directly (not an ORM like SQLAlchemy) to keep the underlying SQL explicit.
 
-- `get_connection()` — opens a connection to the `sports_hub` Postgres database using the credentials in `.env`.
+- `get_connection()` — opens a read-write connection to the `sports_hub` Postgres database using the `DB_*` credentials in `.env`. Used by the pipeline scripts.
+- `get_readonly_connection()` — used by the dashboard. Connects as the `dashboard_ro` role when `DASHBOARD_DB_USER` is set; otherwise falls back to `get_connection()`.
 - `insert_team(conn, league, external_id, name, espn_id=None, venue=None, city=None, capacity=None, founded_year=None)` — upserts one of the four **tracked** teams into `teams` (keyed on `league` + `external_id`) and marks it `is_tracked = true`. Safe to call repeatedly; updates existing rows instead of erroring on duplicates. `capacity` exists as a column but is intentionally left unpopulated (ESPN doesn't return it reliably across sports).
 - `upsert_opponent_team(conn, league, espn_id, name)` — upserts an **opponent** team (keyed on `league` + `espn_id`) so games can reference it. Only updates name/timestamp, never tracked-team fields.
 - `insert_player(conn, team_id, league, external_id, name, position, ...)` — upserts a row into `players`, with a large set of optional enrichment fields (height, weight, jersey number, birth info, college, contract summary, injury status, headshot URL, draft info). Safe to call repeatedly.
@@ -225,7 +227,24 @@ from the project folder, starts at boot, and restarts if it crashes.
    before the next 4 AM run if the new code depends on it
 4. Pi: `sudo systemctl restart sports-hub-dashboard`
 
+If history is ever rewritten (e.g. `git filter-repo`), a plain `git pull` will fail on the Mac and the Pi; use `git fetch && git reset --hard origin/main` on each instead (`.env` and `venv/` are untracked, so they survive).
+
 Dashboard packages are pinned to match the Mac: `streamlit==1.60.0 pandas==3.0.5 altair==6.2.2`.
+
+## Security
+
+The dashboard is public (Tailscale Funnel, no login), so it is set up to do as little damage as possible if something goes wrong.
+
+- **Read-only database role.** The dashboard connects as `dashboard_ro`, which has `SELECT` only (`sql/dashboard_ro_role.sql`). The pipeline cron jobs use the read-write `DB_*` role. Set it up once on the Pi:
+  1. `sudo -u postgres psql -d sports_hub` and run the `CREATE ROLE` / `GRANT` statements from `sql/dashboard_ro_role.sql` with a password of your choice (letters and numbers avoid quoting problems).
+  2. Add `DASHBOARD_DB_USER=dashboard_ro` and `DASHBOARD_DB_PASSWORD=...` to the Pi's `.env` (no quotes, no spaces around `=`).
+  3. `sudo systemctl restart sports-hub-dashboard`.
+  4. Verify it can't write: `PGPASSWORD=... psql -h localhost -U dashboard_ro -d sports_hub -c "DELETE FROM teams WHERE false;"` should fail with `permission denied`.
+  - Gotcha: Postgres reports "password authentication failed" even when the role doesn't exist, so check `SELECT rolname FROM pg_roles;` before debugging the password.
+- **Error details are hidden.** `.streamlit/config.toml` sets `showErrorDetails = "none"`, so visitors see a generic message. The real traceback is in `journalctl -u sports-hub-dashboard`.
+- **Secrets stay out of git.** `.env` is gitignored and `chmod 600` (Mac and Pi). The repo is public and was scanned with gitleaks (full history, no findings).
+- **Keep host details out of the docs.** This repo is public, so use placeholders (`<pi-user>`, `<pi-hostname>`, `<pi-lan-ip>`) rather than the real username, hostname or LAN IP. Git history was rewritten on 2026-09-30 to remove them.
+- **Backups stay out of the repo.** `.gitignore` covers `*backup*.sql`, `*.dump` and `.DS_Store`. Keep database dumps outside the project folder (e.g. `~/Documents/sports-hub-backups/`).
 
 ## API Notes
 

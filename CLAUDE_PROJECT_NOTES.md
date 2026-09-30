@@ -473,3 +473,29 @@ Since the goal is for me to learn, please:
 **Next up:**
 - Optional footer credit line ("Data from ESPN · not affiliated").
 - Roadmap items from the README: error handling/logging in the pipeline, and detecting players who have left a roster.
+
+### 2026-09-30 — Security and polish audit
+Audited this repo plus the two static sites (`willcromer93.github.io`, `links`). All three repos are public.
+
+**Findings**
+- gitleaks (full history) found no secrets in any repo. `.env` was never committed; there is no `secrets.toml`.
+- The public dashboard connected with the same read-write DB role as the ETL scripts, and the Streamlit config did not hide error details.
+- Host details (Pi username, hostname, LAN IP) were in the README and notes.
+- DB backups sat untracked and un-ignored in the project folder.
+
+**Changes**
+- Added `dashboard_ro` (SELECT only): `sql/dashboard_ro_role.sql`, `get_readonly_connection()` in `scripts/db.py`, and `dashboard/data.py` now uses it. Env vars: `DASHBOARD_DB_USER`, `DASHBOARD_DB_PASSWORD`. Details are in the README's Security section.
+- `showErrorDetails = "none"` in `.streamlit/config.toml`. `.env` set to `chmod 600` on both machines.
+- Replaced host details with placeholders and rewrote history with `git filter-repo` (force-pushed). The Mac and the Pi were re-synced with `git fetch && git reset --hard origin/main`. Commit author emails still show the Purdue address; new commits use the GitHub noreply address.
+- `.gitignore` now covers backups, dumps and `.DS_Store`. Backups moved to `~/Documents/sports-hub-backups/`. Removed `scripts/output.txt` and a duplicate `phase2_games_schema.sql`.
+
+**Gotchas hit while deploying**
+- "password authentication failed for user" was really "role does not exist" (the first `CREATE ROLE` had not run). Check `pg_roles` first.
+- Streamlit hid the real traceback from the page, as intended; find it in `journalctl -u sports-hub-dashboard`.
+- `git fetch` alone does not move the branch after a history rewrite; `git reset --hard origin/main` does.
+
+**Portfolio sites:** Lighthouse scored 98-100 in all four categories on all five pages; the one issue (heading order on `data-viz.html`) was fixed. Added `404.html`, `robots.txt`, `sitemap.xml`, canonical and Open Graph tags; fixed copy and facts on the home page.
+
+**Next up:**
+- After the 4 AM run, confirm `logs/pipeline.log` has no errors.
+- Optional: an `apple-touch-icon` for the portfolio (needs a square PNG).
