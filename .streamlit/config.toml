@@ -14,6 +14,7 @@ font = "sans-serif"
 
 [client]
 toolbarMode = "minimal"
+showErrorDetails = "none"
 
 [server]
 headless = true

@@ -116,7 +116,7 @@ Since the goal is for me to learn, please:
 
 **Raspberry Pi setup — Phase 1 complete (headless OS + connectivity):**
 - Goal: move the DB, pipeline, and eventual dashboard onto a Raspberry Pi 4 (1GB RAM) + 256GB USB SSD, running 24/7 independent of the laptop. Website will be public-facing eventually (Colts stadium ethernet planned); DB will stay private, accessible only via Tailscale — never exposed directly to the internet.
-- Flashed Raspberry Pi OS Lite (64-bit) to the SSD via Raspberry Pi Imager, headless (no monitor/keyboard) — hostname `sportshub`, user `<pi-user>`, WiFi + SSH pre-configured through Imager's Customisation step.
+- Flashed Raspberry Pi OS Lite (64-bit) to the SSD via Raspberry Pi Imager, headless (no monitor/keyboard) — hostname `<pi-hostname>`, user `<pi-user>`, WiFi + SSH pre-configured through Imager's Customisation step.
 - **Bug hit and resolved:** Pi (4 years old) had firmware predating reliable USB-boot support — powered on with solid red (power) LED but no green (activity) LED at all, meaning it couldn't find anything bootable on the SSD. Fixed using the 128GB SD card: flashed Raspberry Pi Imager's "Misc utility images → Bootloader → USB Boot" image (a small one-time firmware updater, not a full OS) to the SD card, booted from it once to update the Pi's EEPROM, then swapped back to the SSD. Confirmed working via SSH afterward.
 - SSH connection confirmed working: `ssh <pi-user>@<pi-hostname>.local`. Ran `sudo apt update && sudo apt upgrade -y` to bring the fresh OS current.
 - **Roadmap reminder (from earlier in session):**

@@ -17,6 +17,25 @@ def get_connection():
     )
 
 
+def get_readonly_connection():
+    """
+    Open a connection as the read-only dashboard role (see
+    sql/dashboard_ro_role.sql). Falls back to get_connection() if
+    DASHBOARD_DB_USER isn't set, so the dashboard keeps working until the
+    role exists — set it to stop the public app holding write access.
+    """
+    user = os.getenv("DASHBOARD_DB_USER")
+    if not user:
+        return get_connection()
+    return psycopg2.connect(
+        host=os.getenv("DB_HOST"),
+        port=os.getenv("DB_PORT"),
+        dbname=os.getenv("DB_NAME"),
+        user=user,
+        password=os.getenv("DASHBOARD_DB_PASSWORD"),
+    )
+
+
 def insert_team(
     conn,
     league,

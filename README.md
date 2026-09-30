@@ -84,6 +84,7 @@ DB_PASSWORD=your_postgres_password
 
 - `BALLDONTLIE_KEY` is required for [balldontlie.io](https://www.balldontlie.io/) API calls (used for NBA/NCAAB team identity).
 - `DB_*` variables connect `scripts/db.py` to your local Postgres database.
+- `DASHBOARD_DB_USER` / `DASHBOARD_DB_PASSWORD` (optional) are a read-only role for the dashboard; create it with `sql/dashboard_ro_role.sql`.
 
 ### 4. Database
 
@@ -189,7 +190,7 @@ list in `dashboard/app.py`.
 
 ## Running on the Pi
 
-Everything lives in `/home/<pi-user>/sports-hub` on the Pi (hostname `sportshub`, user
+Everything lives in `/home/<pi-user>/sports-hub` on the Pi (hostname `<pi-hostname>`, user
 `<pi-user>`). The Mac can SSH in without a password (`ssh <pi-user>@<pi-hostname>.local`) via
 an ed25519 key.
 

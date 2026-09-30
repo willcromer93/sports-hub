@@ -14,10 +14,10 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-# Reuse get_connection() from scripts/db.py so the dashboard reads the same
+# Reuse scripts/db.py (read-only connection) so the dashboard reads the same
 # .env credentials as the pipeline, instead of keeping a second copy.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from db import get_connection  # noqa: E402
+from db import get_readonly_connection  # noqa: E402
 from espn import fetch_summary  # noqa: E402
 
 from config import PLAYING_TIME  # noqa: E402
@@ -34,7 +34,7 @@ def run_query(sql, params=None):
     # psycopg2 can't send to Postgres — .item() turns them into plain Python.
     if params:
         params = {k: v.item() if hasattr(v, "item") else v for k, v in params.items()}
-    conn = get_connection()
+    conn = get_readonly_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(sql, params)
