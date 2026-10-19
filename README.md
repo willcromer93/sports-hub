@@ -1,21 +1,22 @@
 # Sports Hub
 
-A data pipeline project that pulls team and player data for four Indiana-area sports teams (Pacers, Purdue, Red Wings, Colts) from various sports APIs and loads it into PostgreSQL, with plans to feed into a Streamlit dashboard.
+A data pipeline and dashboard for four Indiana-area sports teams (Pacers, Purdue, Red Wings, Colts). It pulls team, player, schedule and box-score data from sports APIs into PostgreSQL and shows it in a Streamlit dashboard.
 
 ## Current Status
 
-**Production runs 24/7 on a dedicated Raspberry Pi 4**, independent of any laptop:
-- PostgreSQL lives on the Pi
+**Production runs 24/7 on a home lab server** (HP ProDesk 600 G4, Ubuntu Server 26.04 LTS, 8 GB RAM, NVMe), independent of any laptop. It replaced the original Raspberry Pi 4 on 2026-10-19:
+- PostgreSQL 18 lives on the server
 - `scripts/api_pulls.py` runs automatically every night at 4:00 AM via `cron`, and
   `scripts/refresh_stats.py` every Sunday at 5:00 AM
 - The Streamlit dashboard runs as a systemd service (`sports-hub-dashboard`) on port 8501
-- The Pi is reachable remotely via [Tailscale](https://tailscale.com) for private access from anywhere (phone, work, etc.)
+- The server is reachable remotely via [Tailscale](https://tailscale.com) for private access from anywhere (phone, work, etc.)
 - The dashboard (only) is public at **https://sportshub.taildca027.ts.net** via Tailscale
   Funnel. If it ever stops resolving, it's usually Tailscale's DNS (see tailscale/tailscale#21429);
   a clean `tailscale funnel --https=443 off`, wait 20s, `tailscale funnel --bg 8501` fixed it once
-- Postgres itself is **not** exposed to the public internet — reachable only via Tailscale or from the Pi itself
+- Postgres itself is **not** exposed to the public internet. It listens on `localhost` only
+- The old Raspberry Pi (Tailscale name `sportshub-old`, Postgres 17) was **retired on 2026-10-19**, after the server ran its own nightly pipeline successfully once. It is powered off with its dashboard and Postgres services disabled, its cron jobs removed and its Funnel off. Its SSD is intact, so it can be booted again if ever needed. A final backup (database dump, crontab, service file, logs) is on the server in `~/pi-final-backup/`. See "Migrating to a new server" below for how the move was done.
 
-The setup instructions below are for a **local development copy** (e.g. for testing script changes before deploying them to the Pi) — separate from the live production setup running on the Pi.
+The setup instructions below are for a **local development copy** (e.g. for testing script changes before deploying them to the server) — separate from the live production setup.
 
 ## Project Structure
 SPORTS-HUB/
@@ -26,7 +27,7 @@ SPORTS-HUB/
 │ ├── stats.py # Pivots long-format stats into the tables config.py describes (pandas only)
 │ ├── components.py # Shared UI: headers, W/L records, formatted stat tables
 │ ├── charts.py # Altair charts (margin, game log trend, leaders)
-│ └── views/ # One file per page: overview, team, game (Game Center), player
+│ └── views/ # One file per page: overview, team, game (Game Center), preview, opponents, player
 ├── .streamlit/config.toml # Dashboard theme (colors, font)
 ├── scripts/
 │ ├── api_pulls.py # Nightly: pulls teams, rosters, schedules, period scores, and box scores into Postgres
@@ -41,6 +42,7 @@ SPORTS-HUB/
 │ ├── stat_rollups_season_type.sql # Adds season_type to season/career rollups; season -> season_year
 │ ├── appearances_team_id.sql # Adds team_id to player_game_appearances so opponents' box scores can be stored
 │ └── dashboard_ro_role.sql # Creates the SELECT-only dashboard_ro Postgres role used by the public dashboard
+├── requirements.txt # Exact package versions (pip freeze of the production venv)
 ├── venv/ # Python virtual environment (not tracked in git)
 ├── .env # API keys + DB credentials (not tracked in git)
 ├── Schema.md # Current database schema documentation (9 tables)
@@ -64,11 +66,13 @@ venv\Scripts\activate
 
 ### 2. Dependencies
 
-Install required packages:
+Install the pinned packages (the exact versions production runs):
 
 ```bash
-pip install requests python-dotenv psycopg2-binary streamlit pandas altair
+pip install -r requirements.txt
 ```
+
+To start a fresh venv first: `python3 -m venv venv && source venv/bin/activate`. On Ubuntu/Debian, `python3-venv` is a separate package (`sudo apt install python3-venv`).
 
 ### 3. Environment Variables
 
@@ -85,7 +89,7 @@ DB_PASSWORD=your_postgres_password
 
 - `BALLDONTLIE_KEY` is required for [balldontlie.io](https://www.balldontlie.io/) API calls (used for NBA/NCAAB team identity).
 - `DB_*` variables connect `scripts/db.py` to your local Postgres database.
-- `DASHBOARD_DB_USER` / `DASHBOARD_DB_PASSWORD` (optional locally, **required on the Pi**) are the read-only role the dashboard connects with. Create the role with `sql/dashboard_ro_role.sql`. Without them the dashboard falls back to the read-write `DB_*` credentials.
+- `DASHBOARD_DB_USER` / `DASHBOARD_DB_PASSWORD` (optional locally, **required on the server**) are the read-only role the dashboard connects with. Create the role with `sql/dashboard_ro_role.sql`. Without them the dashboard falls back to the read-write `DB_*` credentials.
 
 ### 4. Database
 
@@ -142,7 +146,7 @@ cd scripts
 python api_pulls.py
 ```
 
-**In production**, this runs automatically nightly at 4:00 AM via `cron` on the Pi — check `~/sports-hub/logs/pipeline.log` on the Pi for run history.
+**In production**, this runs automatically nightly at 4:00 AM via `cron` on the server — check `~/sports-hub/logs/pipeline.log` on the Pi for run history.
 
 ### `scripts/refresh_stats.py`
 
@@ -153,7 +157,7 @@ cd scripts
 python refresh_stats.py
 ```
 
-**In production**, meant to run weekly via `cron` on the Pi (Sundays at 5:00 AM, after the nightly run), logging to `~/sports-hub/logs/refresh.log`.
+**In production**, meant to run weekly via `cron` on the server (Sundays at 5:00 AM, after the nightly run), logging to `~/sports-hub/logs/refresh.log`.
 
 ## Dashboard
 
@@ -190,17 +194,18 @@ results or stat tables opens that game or player.
 To add a page, create `dashboard/views/<name>.py` and add a line to the `pages`
 list in `dashboard/app.py`.
 
-## Running on the Pi
+## Running in production (home lab server)
 
-Everything lives in `/home/<pi-user>/sports-hub` on the Pi (hostname `<pi-hostname>`, user
-`<pi-user>`). The Mac can SSH in without a password (`ssh <pi-user>@<pi-hostname>.local`) via
-an ed25519 key.
+Everything lives in `/home/<server-user>/sports-hub` on the server (Ubuntu Server 26.04 LTS,
+Python 3.14, PostgreSQL 18). The Mac reaches it over Tailscale with an ed25519 key (a
+`~/.ssh/config` entry named `homelab`); the retired Pi still has an entry, `pi`, that only works if it is booted again.
+The server's Tailscale name is `sportshub`.
 
 **Scheduled jobs** (`crontab -l`; the file must end with a newline or the last line is
 silently skipped):
 ```
-0 4 * * * cd /home/<pi-user>/sports-hub && venv/bin/python scripts/api_pulls.py >> /home/<pi-user>/sports-hub/logs/pipeline.log 2>&1
-0 5 * * 0 cd /home/<pi-user>/sports-hub && venv/bin/python scripts/refresh_stats.py >> /home/<pi-user>/sports-hub/logs/refresh.log 2>&1
+0 4 * * * cd /home/<server-user>/sports-hub && venv/bin/python scripts/api_pulls.py >> /home/<server-user>/sports-hub/logs/pipeline.log 2>&1
+0 5 * * 0 cd /home/<server-user>/sports-hub && venv/bin/python scripts/refresh_stats.py >> /home/<server-user>/sports-hub/logs/refresh.log 2>&1
 ```
 
 **Dashboard service**: `/etc/systemd/system/sports-hub-dashboard.service` runs
@@ -211,39 +216,63 @@ from the project folder, starts at boot, and restarts if it crashes.
 - Restart (after pulling new code): `sudo systemctl restart sports-hub-dashboard`
 
 **Where to open it**
-- Home WiFi: http://<pi-hostname>.local:8501 (or http://<pi-lan-ip>:8501)
 - Your own devices, anywhere: Tailscale on → http://sportshub.taildca027.ts.net:8501
 - Anyone with the link: https://sportshub.taildca027.ts.net (Tailscale Funnel)
   - Status: `tailscale funnel status`
-  - Turn off: `tailscale funnel reset` / back on: `tailscale funnel --bg 8501` (no `sudo`
-    needed: the `<pi-user>` user is set as Tailscale operator)
+  - Turn off: `tailscale funnel --https=443 off` / back on: `tailscale funnel --bg 8501` (no `sudo`
+    needed: the server user is set as Tailscale operator via `sudo tailscale set --operator=$USER`)
   - If a device says the link can't be found but it works elsewhere, that device cached an old
     "doesn't exist" DNS answer; on a Mac: `sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder`
 
 **Deploying a change**
 1. Mac: commit, then `git push origin main`
-2. Pi: `cd ~/sports-hub && git pull`
-3. Pi: run any new `sql/*.sql` migration (`psql -v ON_ERROR_STOP=1 -f sql/<file>.sql`) —
+2. Server: `cd ~/sports-hub && git pull`
+3. Server: run any new `sql/*.sql` migration (`psql -v ON_ERROR_STOP=1 -f sql/<file>.sql`) —
    before the next 4 AM run if the new code depends on it
-4. Pi: `sudo systemctl restart sports-hub-dashboard`
+4. Server: `sudo systemctl restart sports-hub-dashboard`
 
-If history is ever rewritten (e.g. `git filter-repo`), a plain `git pull` will fail on the Mac and the Pi; use `git fetch && git reset --hard origin/main` on each instead (`.env` and `venv/` are untracked, so they survive).
+The server's GitHub access is a read-only **deploy key** (`~/.ssh/sports_hub_deploy`, used for `github.com` in `~/.ssh/config`), so it can pull but never push.
 
-Dashboard packages are pinned to match the Mac: `streamlit==1.60.0 pandas==3.0.5 altair==6.2.2`.
+If history is ever rewritten (e.g. `git filter-repo`), a plain `git pull` will fail on the Mac and the server; use `git fetch && git reset --hard origin/main` on each instead (`.env` and `venv/` are untracked, so they survive).
+
+Python packages are pinned in `requirements.txt` (e.g. `streamlit==1.60.0 pandas==3.0.5 altair==6.2.2`). After changing the venv, refresh it with `venv/bin/pip freeze > requirements.txt`.
+
+## Migrating to a new server
+
+How the Pi → home lab move was done (2026-10-15 to 2026-10-19). Reusable for the next move. Keep the old machine untouched until the new one is verified.
+
+1. **Base setup.** Install `postgresql python3-venv python3-pip`. Ubuntu 26.04 only packages PostgreSQL 18; restoring a 17 dump into 18 is supported (older → newer). Set the timezone (`timedatectl`).
+2. **Code.** Create a read-only deploy key on the new server (`ssh-keygen -t ed25519`), add the `.pub` in GitHub → repo Settings → Deploy keys with write access **unchecked**, then `git clone`.
+3. **Secrets and venv.** Copy `.env` machine to machine (`scp -3 old:sports-hub/.env new:sports-hub/.env`, then `chmod 600`). Never print it. Build the venv and `pip install -r requirements.txt`.
+4. **Database.**
+   - Create the roles and an empty DB first (`sudo -u postgres psql`): a normal (non-superuser) owner role, the `dashboard_ro` role, and `CREATE DATABASE sports_hub OWNER <role> TEMPLATE template0 ENCODING 'UTF8'`.
+   - Dump from the old server: `pg_dump -Fc` (custom format).
+   - Restore as the owner role: `pg_restore --single-transaction --exit-on-error --no-owner --no-acl`. `--no-acl` is needed because the dump contains an `ALTER DEFAULT PRIVILEGES FOR ROLE postgres` entry that only a superuser can run. Re-apply the `dashboard_ro` grants afterwards (the `GRANT`/`ALTER DEFAULT PRIVILEGES` lines in `sql/dashboard_ro_role.sql`; skip its `CREATE ROLE` if the role exists).
+   - Verify with per-table row counts **and** a content hash (`md5(string_agg(t::text, '|' order by t::text))`), on both sides.
+5. **Run.** Run `scripts/api_pulls.py` once, run the dashboard, and test every page. Then install the systemd service and cron jobs. Reboot once to prove everything starts by itself.
+6. **Soak.** Leave both servers running for a night or more so the new server's own 4 AM cron runs. Compare logs and row counts before cutting over.
+7. **Cutover (keeping the public URL).** On the old server: `tailscale funnel --https=443 off`, then `tailscale set --hostname=<name>-old`. On the new one: `sudo tailscale set --hostname=sportshub` and `tailscale funnel --bg 8501`. Rename the old server **first**, or Tailscale gives the new one a `-1` suffix. Public DNS came back in under a minute this time (the record already existed); budget up to about 10 minutes.
+8. **Fix SSH aliases.** `~/.ssh/config` host names must follow the rename. After the change, SSH reports "REMOTE HOST IDENTIFICATION HAS CHANGED" for the reused name; compare the fingerprint it prints with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the new machine and, if they match, run `ssh-keygen -R <name>`.
+9. **Rollback.** Rename the machines back and run `tailscale funnel --bg 8501` on the old server. Its data and services are untouched.
+
+Gotchas from this move:
+- Running a long script over `ssh host 'bash -s' <<EOF`: an inner `ssh` or `psql` can swallow the rest of the script from stdin. Add `</dev/null` to inner commands that don't need input.
+- Nested quotes in an `ssh 'psql -c "..."'` one-liner broke a query. Send scripts over stdin instead.
+- Postgres on the new server needs a real password login test over TCP (`psql -h localhost`), not just `sudo -u postgres`, because the app connects over TCP.
 
 ## Security
 
 The dashboard is public (Tailscale Funnel, no login), so it is set up to do as little damage as possible if something goes wrong.
 
-- **Read-only database role.** The dashboard connects as `dashboard_ro`, which has `SELECT` only (`sql/dashboard_ro_role.sql`). The pipeline cron jobs use the read-write `DB_*` role. Set it up once on the Pi:
+- **Read-only database role.** The dashboard connects as `dashboard_ro`, which has `SELECT` only (`sql/dashboard_ro_role.sql`). The pipeline cron jobs use the read-write `DB_*` role, which on the home lab server is a normal (non-superuser) role that owns the database. Set it up once on the server:
   1. `sudo -u postgres psql -d sports_hub` and run the `CREATE ROLE` / `GRANT` statements from `sql/dashboard_ro_role.sql` with a password of your choice (letters and numbers avoid quoting problems).
-  2. Add `DASHBOARD_DB_USER=dashboard_ro` and `DASHBOARD_DB_PASSWORD=...` to the Pi's `.env` (no quotes, no spaces around `=`).
+  2. Add `DASHBOARD_DB_USER=dashboard_ro` and `DASHBOARD_DB_PASSWORD=...` to the server's `.env` (no quotes, no spaces around `=`).
   3. `sudo systemctl restart sports-hub-dashboard`.
   4. Verify it can't write: `PGPASSWORD=... psql -h localhost -U dashboard_ro -d sports_hub -c "DELETE FROM teams WHERE false;"` should fail with `permission denied`.
   - Gotcha: Postgres reports "password authentication failed" even when the role doesn't exist, so check `SELECT rolname FROM pg_roles;` before debugging the password.
 - **Error details are hidden.** `.streamlit/config.toml` sets `showErrorDetails = "none"`, so visitors see a generic message. The real traceback is in `journalctl -u sports-hub-dashboard`.
-- **Secrets stay out of git.** `.env` is gitignored and `chmod 600` (Mac and Pi). The repo is public and was scanned with gitleaks (full history, no findings).
-- **Keep host details out of the docs.** This repo is public, so use placeholders (`<pi-user>`, `<pi-hostname>`, `<pi-lan-ip>`) rather than the real username, hostname or LAN IP. Git history was rewritten on 2026-09-30 to remove them.
+- **Secrets stay out of git.** `.env` is gitignored and `chmod 600` (Mac and server). The repo is public and was scanned with gitleaks (full history, no findings).
+- **Keep host details out of the docs.** This repo is public, so use placeholders (`<server-user>`, `<pi-hostname>`, `<server-lan-ip>`) rather than the real username, hostname or LAN IP. Git history was rewritten on 2026-09-30 to remove them.
 - **Backups stay out of the repo.** `.gitignore` covers `*backup*.sql`, `*.dump` and `.DS_Store`. Keep database dumps outside the project folder (e.g. `~/Documents/sports-hub-backups/`).
 
 ## API Notes
@@ -263,6 +292,8 @@ The dashboard is public (Tailscale Funnel, no login), so it is set up to do as l
 - [x] Refresh `SCHEMA.md` to match the current `players` table
 - [x] Add team-level enrichment: venue, city, founded year (`capacity` added to schema but intentionally left unpopulated)
 - [x] Move to 24/7 infrastructure (Raspberry Pi) independent of a laptop
+- [x] Migrate from the Raspberry Pi to a home lab server (Ubuntu, PostgreSQL 18), keeping the public URL (2026-10-19)
+- [x] Retire the Raspberry Pi (2026-10-19; powered off, disk kept intact)
 - [x] Add scheduling (`cron`) to pull data on a regular interval
 - [x] Populate `games` (regular-season schedules + final scores, all four teams)
 - [x] Add `season_type` to `games` and load preseason/postseason games

@@ -39,7 +39,7 @@ This file exists so that any Claude conversation about this project starts with 
   └── .vscode/
       └── settings.json
   ```
-- **Database:** PostgreSQL (Postgres.app on macOS), database name `sports_hub`, connected via SQLTools in VS Code. Production database lives on the Pi (see README); the Mac holds a local dev copy. 9 tables — see `Schema.md` for table layout, reasoning, and build order.
+- **Database:** PostgreSQL (Postgres.app on macOS), database name `sports_hub`, connected via SQLTools in VS Code. Production database lives on the home lab server (PostgreSQL 18, see README; it replaced the Raspberry Pi on 2026-10-19); the Mac holds a local dev copy that is now stale and can be refreshed from the server with `pg_dump -Fc`. 9 tables — see `Schema.md` for table layout, reasoning, and build order.
 - **Tools already set up:** Python, Pylance, Black (formatter), Ruff (linter), SQLTools + Postgres driver, python-dotenv for API keys.
 - **APIs in use:**
   - **ESPN hidden API** (`site.api.espn.com`) — used for Colts team info, and now the primary source for *all* player roster data (Pacers, Purdue, Red Wings, Colts — all four teams complete as of 2026-08-29).
@@ -499,3 +499,53 @@ Audited this repo plus the two static sites (`willcromer93.github.io`, `links`).
 **Next up:**
 - After the 4 AM run, confirm `logs/pipeline.log` has no errors.
 - Optional: an `apple-touch-icon` for the portfolio (needs a square PNG).
+
+### 2026-10-15 to 2026-10-19 — Migration from the Raspberry Pi to a home lab server
+
+**New infrastructure:** HP ProDesk 600 G4 (8 GB RAM, 512 GB NVMe), Ubuntu Server 26.04 LTS, Python 3.14, **PostgreSQL 18** (the only version Ubuntu 26.04 packages; restoring a 17 dump into 18 is the supported direction). It is the new production server; the Tailscale name `sportshub` now points at it. The old Pi is `sportshub-old`, Funnel off; it was first kept as a fallback, then retired the same day (see the 2026-10-19 retirement entry below).
+
+**Decisions made:**
+- **Source of truth:** the Pi. It had 725 players / 21 finals vs the Mac's 436 / 8 (the Mac was the Sep 25 snapshot), so the Mac copy was stale and nothing Mac-only needed saving.
+- **Postgres version:** 18 (matches the Mac; only option in Ubuntu's repo).
+- **URL plan:** keep `sportshub.taildca027.ts.net` by renaming the machines in Tailscale, instead of publishing a new address.
+
+**What was done, phase by phase** (full runbook with commands is in the README, "Migrating to a new server"):
+- **Phase 0, inventory (read-only):** Pi was clean (nothing uncommitted/unpushed), Postgres 17.11, 13 MB database, Python 3.13.5, two cron jobs, systemd dashboard on 8501, Tailscale Funnel proxying to it. `requirements.txt` did not exist.
+- **Phase 1:** installed `postgresql python3-venv python3-pip` (timezone was already America/Indiana/Indianapolis).
+- **Phase 2:** created a read-only GitHub **deploy key** on the server, cloned the repo (same commit as the Pi).
+- **Phase 3:** copied `.env` machine to machine with `scp -3` (`chmod 600`, never printed); generated **`requirements.txt`** from the Pi's venv (43 packages, committed to the repo); all pinned packages installed on Python 3.14 from prebuilt wheels with no conflicts.
+- **Phase 4:** created the roles and an empty DB (owner role is a normal non-superuser, unlike the Pi where it was a superuser), `pg_dump -Fc` from the Pi, restored on the server. **All 9 tables matched on both row counts and per-table MD5 content hashes.**
+- **Phase 5:** ran `api_pulls.py` (exit 0, 5 s, 0 errors), tested all 6 dashboard pages, installed the systemd service and the two cron jobs, then **reboot test passed** (Postgres, dashboard, cron, Tailscale all back on their own, data intact).
+- **Soak:** the server's own 4 AM cron ran unattended on 2026-10-19; every table count and the newest game matched the Pi (817 players, 25 finals, 15,692 stat rows).
+- **Phase 6, cutover (2026-10-19):** Pi `tailscale funnel off` + renamed `sportshub-old`; server renamed `sportshub` and `tailscale funnel --bg 8501`. Public URL (`/`, `/team`, `/health`) returned HTTP 200 about 20 seconds after Funnel was enabled (DNS record already existed; the ~10 minute bug window from 09-25 did not recur). Total public downtime about 3 minutes.
+
+**Bugs and gotchas hit (and fixed):**
+- **`pg_restore` failed on `ALTER DEFAULT PRIVILEGES FOR ROLE postgres`** (needs a superuser). Because the restore ran with `--single-transaction`, it rolled back cleanly and left 0 tables. Fix: restore with `--no-acl`, then re-apply the `dashboard_ro` grants from `sql/dashboard_ro_role.sql` (minus its `CREATE ROLE`). Verified `dashboard_ro` can read but not write.
+- **"password authentication failed" was really "roles not created yet"** — a repeat of the 09-30 lesson. I had run the check before the commands were run; check `\du` first.
+- **Shell script pitfalls while driving the servers over SSH:** an inner `ssh -T` swallowed the rest of a heredoc script (add `</dev/null`); nested quotes in a one-line `psql -c` broke a query (send scripts over stdin); zsh doesn't word-split a `$VAR` holding a command (use a function).
+- **Test harness, not app bugs:** Streamlit `AppTest` needs `dashboard/` on `sys.path` and must navigate via `app.py` (`switch_page`), because the pages read `st.session_state["team"]` set by the filter bar.
+- **Renaming machines breaks name-based SSH:** `ssh sportshub` would have landed on the new server, and SSH raised "HOST IDENTIFICATION HAS CHANGED" for the reused name. I verified the fingerprint matched the new server's real key before running `ssh-keygen -R sportshub`, and updated `~/.ssh/config`: alias `homelab` → `sportshub`, new alias `pi` → `sportshub-old`.
+- Locale differs (Pi `en_GB.UTF-8`, server `en_US.UTF-8`); only affects edge-case text sorting, and all content hashes matched.
+
+**Current state:**
+- Production: server (`sportshub`). The Pi (`sportshub-old`) was retired later the same day; see the next entry.
+- Backups: the dump used for the migration (`sports_hub_pi.dump`) still exists in the server's home folder and in a temp folder on the Mac. It has no passwords but is the full dataset; delete both once you are sure nothing is needed from them.
+
+**Next up:**
+- Watch the next few 4 AM runs on the server (`logs/pipeline.log`, `logs/refresh.log`).
+- Delete the migration dumps once you are sure nothing is needed from them (see the retirement entry below for where they are).
+- Optionally refresh the Mac's stale dev DB: `pg_dump -Fc` from the server, `pg_restore` locally.
+- Roadmap items still open: error handling/logging in the pipeline, detecting players who left a roster, the footer ESPN credit.
+
+### 2026-10-19 (continued) — Raspberry Pi retired
+
+- **Decision:** retire the Pi now instead of after the planned fallback week. Reason: the server had already run its own 4 AM pipeline unattended with identical results, and the Pi's SSD stays intact, so the retirement is reversible. Chose "stop it, keep the disk" over wiping it.
+- **Before shutdown, a final backup went to the server** in `~/pi-final-backup/`: `pg_dump -Fc` of the Pi database (9 tables readable), the Pi's crontab, its `sports-hub-dashboard.service`, and its logs. The Pi's `.env` was not copied again; the server already has an identical one.
+- **Pi cron removed** (`crontab -r`, after saving a copy as `~/crontab_retired_2026-10-19.txt` on the Pi). Then `sudo systemctl disable --now sports-hub-dashboard postgresql` and `sudo poweroff`, so nothing auto-starts if it is ever booted again.
+- **Verified afterwards:** the Pi is unreachable (SSH times out, no ping, Tailscale shows `sportshub-old` offline). Homelab Postgres, dashboard, cron and Tailscale are all active, and the public site returns HTTP 200 on `/` and `/team`.
+- **Gotcha:** the first attempt did not work because the commands were run in a terminal that was not connected to the Pi. Symptoms were that nothing changed on the Pi (3-week uptime, services still enabled) and its log had no sudo entry from me. Lesson: run `hostname; uname -s` first. The Pi's Linux hostname is still `sportshub` even though its Tailscale name is `sportshub-old`, which makes this easy to mix up. Also, "no output" from `ssh host true` means success, so test with the exit code (`echo $?`).
+
+**Next up:**
+- Remove `sportshub-old` from the Tailscale admin console (Machines, then Remove).
+- Decide when to delete the dumps (on the server in `~/` and `~/pi-final-backup/`, and the temp copy on the Mac) and whether to wipe or repurpose the Pi's SSD.
+- Start new feature work on the home lab server: pipeline error handling and logging, roster-departure detection, the dashboard ESPN credit footer.
