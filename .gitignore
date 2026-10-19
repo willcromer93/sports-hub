@@ -1,8 +1,27 @@
 venv/
-.env
 data/
 __pycache__/
 # Local files that must never be committed
 .DS_Store
+
+# Secrets and per-machine settings. Document variable NAMES in .env.example only.
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+*.pem
+*.key
+id_*
+
+# Database backups and dumps (contain the full dataset)
+backups/
+*backup*/
 *backup*.sql
 *.dump
+*.dump.partial
+*.sql.gz
+*.tar.gz
+
+# Runtime output
+logs/
+*.log

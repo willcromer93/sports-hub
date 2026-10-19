@@ -33,7 +33,9 @@ SPORTS-HUB/
 │ ├── api_pulls.py # Nightly: pulls teams, rosters, schedules, period scores, and box scores into Postgres
 │ ├── refresh_stats.py # Weekly: re-checks recent games for ESPN stat corrections, rewrites only what changed
 │ ├── espn.py # Shared ESPN game-summary helpers (fetch, parse line scores + box scores); no DB access
-│ └── db.py # Database connections (read-write + read-only for the dashboard) + insert/read functions
+│ ├── db.py # Database connections (read-write + read-only for the dashboard) + insert/read functions
+│ ├── backup_db.sh # Nightly pg_dump into BACKUP_DIR, verified, old ones pruned (see Backups)
+│ └── restore_test.sh # Weekly: restore the newest dump into a scratch DB and compare row counts
 ├── sql/
 │ ├── schema.sql # Phase 1 schema — currently a Markdown snapshot, not runnable SQL (to be replaced)
 │ ├── phase2_games_schema.sql # Phase 2 DDL: games, game_periods, sport_period_labels (+ seeds), game_id FKs
@@ -44,7 +46,8 @@ SPORTS-HUB/
 │ └── dashboard_ro_role.sql # Creates the SELECT-only dashboard_ro Postgres role used by the public dashboard
 ├── requirements.txt # Exact package versions (pip freeze of the production venv)
 ├── venv/ # Python virtual environment (not tracked in git)
-├── .env # API keys + DB credentials (not tracked in git)
+├── .env # API keys + DB credentials + backup settings (not tracked in git)
+├── .env.example # The same variable names with placeholder values; safe to commit
 ├── Schema.md # Current database schema documentation (9 tables)
 ├── CLAUDE_PROJECT_NOTES.md # Dated running log of project progress/decisions
 └── .gitignore
@@ -259,6 +262,37 @@ Gotchas from this move:
 - Running a long script over `ssh host 'bash -s' <<EOF`: an inner `ssh` or `psql` can swallow the rest of the script from stdin. Add `</dev/null` to inner commands that don't need input.
 - Nested quotes in an `ssh 'psql -c "..."'` one-liner broke a query. Send scripts over stdin instead.
 - Postgres on the new server needs a real password login test over TCP (`psql -h localhost`), not just `sudo -u postgres`, because the app connects over TCP.
+
+## Backups
+
+The server keeps compressed database dumps, and a weekly test proves they can actually be restored.
+
+| What | When | Where |
+|---|---|---|
+| `scripts/backup_db.sh` | Daily 3:30 AM (before the 4 AM pipeline) | `~/backups/` on the server (`BACKUP_DIR`), last 30 days kept (`BACKUP_KEEP_DAYS`), log in `logs/backup.log` |
+| `scripts/restore_test.sh` | Sundays 6:00 AM | Restores the newest dump into a scratch database (`RESTORE_TEST_DB`) and compares row counts with live; log in `logs/restore_test.log` |
+
+```
+30 3 * * * /home/<server-user>/sports-hub/scripts/backup_db.sh >> /home/<server-user>/sports-hub/logs/backup.log 2>&1
+0 6 * * 0 /home/<server-user>/sports-hub/scripts/restore_test.sh >> /home/<server-user>/sports-hub/logs/restore_test.log 2>&1
+```
+
+- **How it stays safe:** the dump is written to a hidden `.partial` file, checked with `pg_restore -l`, and only then renamed, so a half-written backup never looks valid. Scripts stop at the first error (`set -euo pipefail`), `umask 077` makes everything private to the server user, and the folder is mode `700`.
+- **One-time setup for the restore test** (needs sudo): create the empty scratch database owned by the app role. Run on the server, as one paste:
+  ```bash
+  set -a; . ~/sports-hub/.env; set +a
+  sudo -u postgres psql -v ON_ERROR_STOP=1 -v owner="$DB_USER" -v db="$RESTORE_TEST_DB" <<'SQL'
+  CREATE DATABASE :"db" OWNER :"owner" TEMPLATE template0 ENCODING 'UTF8' LOCALE 'en_US.UTF-8';
+  SQL
+  ```
+  The scratch database is a throwaway: the script refuses to run if `RESTORE_TEST_DB` equals the live `DB_NAME`.
+- **Off-machine copy:** the same disk can't protect against its own failure, so pull the dumps to another machine. From the Mac (`--ignore-existing` means it never overwrites; the destination is outside the repo):
+  ```bash
+  mkdir -p ~/Documents/sports-hub-backups/homelab && chmod 700 ~/Documents/sports-hub-backups
+  rsync -a --ignore-existing homelab:backups/ ~/Documents/sports-hub-backups/homelab/
+  ```
+- **Restoring for real:** create an empty database, then `pg_restore -d <db> --no-owner --no-acl <dump>`, and re-apply the `dashboard_ro` grants (see "Migrating to a new server"). Run the restore test first to confirm the dump is good.
+- **What is kept out of git:** `.gitignore` covers `.env` and every `.env.*` (except `.env.example`, which lists variable names with placeholder values), `backups/`, `*.dump`, `*.dump.partial`, `*.sql.gz`, `*.tar.gz`, `logs/`, `*.log`, keys, and `.streamlit/secrets.toml`. Backup settings live in the server's `.env`. Check with `git check-ignore -v <path>`.
 
 ## Security
 

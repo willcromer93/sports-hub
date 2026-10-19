@@ -549,3 +549,21 @@ Audited this repo plus the two static sites (`willcromer93.github.io`, `links`).
 - Remove `sportshub-old` from the Tailscale admin console (Machines, then Remove).
 - Decide when to delete the dumps (on the server in `~/` and `~/pi-final-backup/`, and the temp copy on the Mac) and whether to wipe or repurpose the Pi's SSD.
 - Start new feature work on the home lab server: pipeline error handling and logging, roster-departure detection, the dashboard ESPN credit footer.
+
+### 2026-10-19 (continued) — Scope confirmed, Phase A: backups and secrets hygiene
+
+- **Scope decision:** the goal is **all 7 leagues (NFL, NHL, NBA, CBB, CFB, MLB, WNBA), every team**; the ProDesk was bought to run that scale. This supersedes the four-team description earlier in this file and in the README. Agreed roadmap order: A) backups and hardening, B) pipeline error handling + logging + a failure alert (ntfy phone push, chosen over email), C) roster-departure detection and post-run sanity checks, D) add leagues easiest first (all NFL/NHL/NBA teams, WNBA, CBB, MLB, CFB), E) dashboard at scale, F) dev workflow, G) housekeeping.
+- **Inspection (read-only):** homelab has one 477 GB NVMe and no second disk, no backups, Postgres on localhost only, unattended-upgrades enabled. Streamlit listens on 0.0.0.0:8501 (home LAN reachable); firewall rules not yet reviewed (needs sudo).
+- **Backups built** (`scripts/backup_db.sh`, `scripts/restore_test.sh`): nightly 3:30 AM dump into `~/backups` (30 days kept), written to a `.partial` file, checked with `pg_restore -l`, then renamed. Weekly Sunday 6 AM restore test into a scratch database `sports_hub_restore_test`, comparing row counts with live. Settings `BACKUP_DIR`, `BACKUP_KEEP_DAYS`, `RESTORE_TEST_DB` live in the server's `.env`.
+- **Verified:** first backup 216 KB, folder mode 700 and file mode 600, all 9 tables readable. Restore test passed (every table restored with the same row count as live). The test can fail: it exits non-zero with no backups and with a corrupt dump. A copy of the newest dump was pulled to the Mac (`~/Documents/sports-hub-backups/homelab/`, outside the repo) and its checksum matched the server's.
+- **Secrets hygiene:** rewrote `.gitignore` (now also covers `.env.*`, `backups/`, `*.dump.partial`, archives, `logs/`, `*.log`, keys, `.streamlit/secrets.toml`; `logs/` had been showing up untracked) and added `.env.example` (variable names with placeholders only). Checked with `git check-ignore` that every sensitive path is ignored and that `.env.example` is not.
+- **Gotchas:**
+  - The scratch database needs one sudo command (the app role has no CREATEDB, on purpose). Pasting only the `CREATE DATABASE` line gave "command not found", since it is SQL and must be fed to `psql` as one block with the `SQL` terminator at column 0.
+  - My first negative test was invalid: the script sources `.env` after the command line, so `.env`'s `BACKUP_DIR` wins over an inline override. Test with a modified copy of the script instead.
+  - Under `set -o pipefail`, a failing `ls` inside `$( … )` aborts before a friendly message; add `2>/dev/null … || true` when you want to print your own error.
+  - Cron lines must end with a newline (the 08-30 gotcha); checked after installing.
+
+**Next up:**
+- Review the firewall (`sudo ufw status verbose`) and decide whether to bind Streamlit to 127.0.0.1.
+- Phase B: timeouts, retries, `logging`, a one-line run summary, and an ntfy alert on failure (the backup and restore-test cron jobs fail silently into their logs until then).
+- Automate the Mac-side backup pull (launchd) once you are happy with the manual `rsync`.
