@@ -32,6 +32,7 @@ class RegistryTests(unittest.TestCase):
                 self.assertIn(league.team_source, ("teams_list", "fbs_standings"))
                 # the floor must sit below what ESPN lists, or a healthy reply would fail
                 self.assertLess(league.min_teams, league.expected_teams)
+                self.assertGreater(league.min_roster, 0)
                 # ...but above 50, the silent truncation size, for the big college lists
                 if league.expected_teams > 50:
                     self.assertGreater(league.min_teams, 50)

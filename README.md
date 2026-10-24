@@ -40,6 +40,7 @@ SPORTS-HUB/
 │ ├── leagues.py # The league registry (7 leagues), featured teams, and the LEAGUES_ALL setting
 │ ├── team_discovery.py # Lists every team in a league from ESPN, with safety checks (floor count, no duplicates)
 │ ├── check_leagues.py # Read-only: asks ESPN what each league lists (run it before enabling a league)
+│ ├── league_gate.py # Read-only: judges one league's data PASS/FAIL/REVIEW before it is enabled for real
 │ ├── roster_tracking.py # The rule for marking departed players (and its safety guard); no database code
 │ ├── sanity_checks.py # Post-run checks on the finished data (duplicates, scores, box scores, row counts, freshness)
 │ ├── notify.py # Phone alerts (ntfy) and "did it run?" pings (healthchecks.io), for Python
@@ -225,14 +226,22 @@ venv/bin/python scripts/check_leagues.py            # all 7 leagues
 venv/bin/python scripts/check_leagues.py NBA WNBA   # just these
 ```
 
-It is read-only (ESPN only, no database) and fails if a league lists fewer teams than expected. Then try the league on a copy of the database first (never first on live data), and work through this gate before adding it to `LEAGUES_ALL` on the server:
+It is read-only (ESPN only, no database) and fails if a league lists fewer teams than expected. Then try the league on a copy of the database first (never first on live data): run the pipeline against it with the league enabled (`LEAGUES_ALL=NBA DB_NAME=sports_hub_staging ...`), and judge the result with the gate tool:
 
-1. Team count equals what ESPN lists, and every roster is non-empty and plausible.
-2. Every final game has a box score, and period scores add up to the final score for 99%+ of games (known ESPN errors go in `ACKNOWLEDGED_PERIOD_MISMATCHES` with the reason).
-3. Every stat name has been reviewed for "can it be summed?" (rates such as batting average or ERA cannot), so rollups stay correct.
-4. Rollup totals match an independent re-aggregation of the box scores.
-5. Request count and run time are within budget, and all sanity checks are clean.
-6. The featured teams' dashboard pages are unchanged.
+```bash
+DB_NAME=sports_hub_staging venv/bin/python scripts/league_gate.py NBA
+```
+
+It is read-only (the database connection is opened read-only, so it cannot change anything), prints one PASS / FAIL / REVIEW line per check and exits 1 if anything fails. Add the league to `LEAGUES_ALL` on the server only when every line passes and any REVIEW line has been looked at:
+
+1. **Team count** equals what ESPN lists.
+2. **Rosters:** every team has at least the league's `min_roster` confirmed players.
+3. **Box scores** exist for 99%+ of the tracked sides of final games.
+4. **Period scores** exist and add up to the final score for 99%+ of final games (known ESPN errors in `ACKNOWLEDGED_PERIOD_MISMATCHES` are excluded).
+5. **Rollup totals** match an independent re-addition of the box scores, per stat and season type.
+6. **Stat names:** any name that is summed but looks like a rate (percentages, averages, ERA, OPS...) is listed for review; add real rates to `NON_ADDITIVE_STAT_PATTERN` in `db.py`. Note that pattern is case-sensitive (`Avg` is excluded, `avg` is not), so a league whose stats use other capitalization needs its names checked here.
+7. **Last run** of the pipeline was clean (status ok, no warnings, no sanity problems) and within the time budget (default 25 minutes).
+8. **Featured teams** are still exactly the four dashboard teams.
 
 **Traps found by probing ESPN** (all defended against in `team_discovery.py` and covered by tests):
 - The teams endpoint returns only the **first 50 teams** unless `limit` is passed, with no count or paging field, so a truncated list looks complete. Every list is requested with `limit=1000` and must reach the league's `min_teams` floor.
@@ -364,7 +373,7 @@ Three layers, so a problem reaches your phone whether a job *fails* or *never ru
 
 **API calls** all go through `http_client.fetch_json()`: 5 s connect and 30 s read timeouts, up to 3 retries (waits of 1, 2, 4 s, honoring `Retry-After`) for timeouts, dropped connections, HTTP 429 and 5xx, a 0.2 s pause between calls, and a clear `FetchError` naming the URL if it still fails. A 404 isn't retried.
 
-**Tests:** `venv/bin/python -m unittest discover -s tests -v` (70 tests, about 3 seconds). They run a throwaway local web server that returns 500s, 404s, garbage JSON and slow replies, and check the retry, timeout and alert logic without touching any real API.
+**Tests:** `venv/bin/python -m unittest discover -s tests -v` (96 tests, about 3 seconds). They run a throwaway local web server that returns 500s, 404s, garbage JSON and slow replies, and check the retry, timeout and alert logic without touching any real API.
 
 **Failure drill** (run after changing this machinery): on a throwaway copy, break something on purpose (an unreachable API URL, a wrong database name, a bad `.env` password) and confirm that the run exits 1, the other steps still run, a message reaches your phone, and the healthchecks.io check goes red. Never test against the live `.env` values without telling yourself first, since the alerts are real.
 

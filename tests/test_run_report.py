@@ -25,6 +25,7 @@ import logging  # noqa: E402
 logging.getLogger("sports_hub").addHandler(logging.NullHandler())
 
 import notify  # noqa: E402
+import run_report  # noqa: E402
 from run_report import RunReport  # noqa: E402
 
 SECRET_TOPIC = "super-secret-topic-123"
@@ -78,7 +79,7 @@ class RunReportTests(unittest.TestCase):
         with report.step("bad"):
             raise ValueError("nope")
         report.finish()
-        data = json.loads((Path(_tmp.name) / "last_t_json.json").read_text())
+        data = json.loads((Path(run_report.LOG_DIR) / "last_t_json.json").read_text())  # wherever the module really writes
         self.assertEqual(data["status"], "errors")
         self.assertEqual(data["errors"][0]["step"], "bad")
 

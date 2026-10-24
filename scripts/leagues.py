@@ -24,6 +24,7 @@ class League:
     team_source: str  # how to list every team: "teams_list" or "fbs_standings"
     min_teams: int  # fewer teams than this from ESPN means a truncated or broken reply
     expected_teams: int  # what ESPN listed on 2026-10-23 (documentation for humans)
+    min_roster: int  # a roster smaller than this is a broken pull (used by the league gate)
 
 
 # The 7 leagues. min_teams is a floor, not an exact count: ESPN's teams endpoint returns
@@ -36,7 +37,7 @@ class League:
 LEAGUES = {
     league.code: league
     for league in [
-        League("NBA", "NBA", "basketball/nba", "teams_list", 28, 30),
+        League("NBA", "NBA", "basketball/nba", "teams_list", 28, 30, 10),
         # College basketball keeps the code NCAAB (Purdue's rows already use it).
         League(
             "NCAAB",
@@ -45,11 +46,12 @@ LEAGUES = {
             "teams_list",
             350,
             362,
+            5,
         ),
-        League("NHL", "NHL", "hockey/nhl", "teams_list", 30, 32),
-        League("NFL", "NFL", "football/nfl", "teams_list", 30, 32),
-        League("WNBA", "WNBA", "basketball/wnba", "teams_list", 12, 15),
-        League("MLB", "MLB", "baseball/mlb", "teams_list", 28, 30),
+        League("NHL", "NHL", "hockey/nhl", "teams_list", 30, 32, 18),
+        League("NFL", "NFL", "football/nfl", "teams_list", 30, 32, 40),
+        League("WNBA", "WNBA", "basketball/wnba", "teams_list", 12, 15, 8),
+        League("MLB", "MLB", "baseball/mlb", "teams_list", 28, 30, 20),
         # ESPN's college football team list holds 762 teams of every level and ignores
         # a division filter, so the top division (FBS) comes from its standings.
         League(
@@ -59,6 +61,7 @@ LEAGUES = {
             "fbs_standings",
             130,
             138,
+            60,
         ),
     ]
 }
