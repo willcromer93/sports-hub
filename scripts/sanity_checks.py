@@ -22,6 +22,13 @@ log = logging.getLogger("sports_hub.sanity")
 MAX_EXAMPLES = 3  # how many offenders to name in an alert
 STALE_HOURS = 36  # a game this old should have been filled in by the nightly runs
 
+# Period scores vs final score. ESPN's own data is occasionally inconsistent (its line
+# scores add up to one goal fewer than its own final score), so a mismatch is judged by
+# how NEW it is and how COMMON it is, not by whether it exists:
+RECENT_DAYS = 3  # a mismatch on a game finished this recently is reported (once, in effect)
+SYSTEMIC_RATE = 0.02  # more than 2% of a league's finals mismatching is no ESPN quirk
+MIN_GAMES_FOR_RATE = 50  # ...but only judge a rate once a league has this many games
+
 # Known upstream data errors we have looked into and can't fix, so they don't alert
 # every night. Each entry says WHY. If ESPN later corrects one, the check logs a note
 # so the entry can be deleted. Keys are (league, ESPN event id).
@@ -30,6 +37,16 @@ ACKNOWLEDGED_PERIOD_MISMATCHES = {
         "Red Wings 5, Senators 3 on 2026-10-06: ESPN's own line scores are 2-2-0 "
         "(total 4) but its final score is 5. ESPN's feed contradicts itself; "
         "checked against the live API on 2026-10-23."
+    ),
+    ("NHL", "401886441"): (
+        "Maple Leafs 6, Senators 1 on 2026-09-23 (preseason): ESPN's line scores for "
+        "Toronto are 2-3-0 (total 5) but its final score is 6; checked against the live "
+        "API on 2026-10-24."
+    ),
+    ("NHL", "401879364"): (
+        "Avalanche 4, Mammoth 1 on 2026-09-20 (preseason): ESPN's line scores for "
+        "Colorado are 0-1-2 (total 3) but its final score is 4; checked against the live "
+        "API on 2026-10-24. Like the other two, the HOME team's line score is one goal short."
     ),
 }
 
@@ -132,21 +149,39 @@ def check_final_games_have_scores(conn):
 
 
 def check_period_sums(conn):
-    """Per-period scores must add up to the final score (this is the check that
-    was done by hand on 2026-09-24; NHL shootouts add up too, since the winner's
-    shootout entry is 1)."""
+    """Per-period scores should add up to the final score (the check done by hand on
+    2026-09-24; NHL shootouts add up too, since the winner's shootout entry is 1).
+
+    ESPN's own data is occasionally inconsistent, so a mismatch is judged by how new and
+    how common it is. Reported: (1) a mismatch on a game that finished in the last
+    RECENT_DAYS days, which alerts when it first appears rather than every night forever,
+    and (2) a league where more than SYSTEMIC_RATE of the finals mismatch, which is more
+    likely a bug in our data than an ESPN quirk. Games in ACKNOWLEDGED_PERIOD_MISMATCHES
+    (looked into, documented, not fixable) are never reported."""
     rows = _fetch(
         conn,
         """
-        SELECT g.league, g.external_id
+        SELECT g.league, g.external_id, g.game_time >= now() - make_interval(days => %s)
         FROM games g
         JOIN (SELECT game_id, sum(home_score) AS h, sum(away_score) AS a
               FROM game_periods GROUP BY game_id) p USING (game_id)
         WHERE g.status = 'final' AND (g.home_score <> p.h OR g.away_score <> p.a)
         ORDER BY g.game_time DESC;
         """,
+        (RECENT_DAYS,),
     )
-    mismatched = {(league, external_id) for league, external_id in rows}
+    totals = dict(
+        _fetch(
+            conn,
+            """
+            SELECT g.league, count(*)
+            FROM games g
+            WHERE g.status = 'final' AND EXISTS (SELECT 1 FROM game_periods p WHERE p.game_id = g.game_id)
+            GROUP BY g.league;
+            """,
+        )
+    )
+    mismatched = {(league, external_id) for league, external_id, _recent in rows}
     for key in ACKNOWLEDGED_PERIOD_MISMATCHES:
         if key not in mismatched:
             log.info(
@@ -154,10 +189,26 @@ def check_period_sums(conn):
                 "remove it from ACKNOWLEDGED_PERIOD_MISMATCHES",
                 key,
             )
-    new = [row for row in rows if tuple(row) not in ACKNOWLEDGED_PERIOD_MISMATCHES]
-    if not new:
-        return []
-    return [f"{len(new)} final game(s) whose periods don't add up to the score (e.g. {_examples(new)})"]
+    new = [row for row in rows if (row[0], row[1]) not in ACKNOWLEDGED_PERIOD_MISMATCHES]
+
+    problems = []
+    recent = [(league, eid) for league, eid, is_recent in new if is_recent]
+    if recent:
+        problems.append(
+            f"{len(recent)} final game(s) from the last {RECENT_DAYS} days whose periods "
+            f"don't add up to the score (e.g. {_examples(recent)})"
+        )
+    per_league = {}
+    for league, _eid, _recent in new:
+        per_league[league] = per_league.get(league, 0) + 1
+    for league, n in sorted(per_league.items()):
+        total = totals.get(league, 0)
+        if total >= MIN_GAMES_FOR_RATE and n / total > SYSTEMIC_RATE:
+            problems.append(
+                f"{league}: {n} of {total} final games ({100 * n / total:.1f}%) have periods "
+                f"that don't add up, too many to be an ESPN quirk"
+            )
+    return problems
 
 
 def check_box_scores_present(conn):

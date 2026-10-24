@@ -69,6 +69,7 @@ HEALTHY = [
     ("WHERE NOT EXISTS ( SELECT 1 FROM teams t", []),
     ("home_score IS NULL OR away_score IS NULL", []),
     ("FROM game_periods GROUP BY game_id", []),
+    ("AND EXISTS (SELECT 1 FROM game_periods", []),
     ("FROM player_game_appearances a", []),
     ("max(last_updated)", [(False,)]),
     ("SELECT count(*) FROM", [(10,)]),
@@ -140,12 +141,12 @@ class IndividualCheckTests(unittest.TestCase):
 class AcknowledgedMismatchTests(unittest.TestCase):
     def test_acknowledged_game_is_not_reported(self):
         key = next(iter(sc.ACKNOWLEDGED_PERIOD_MISMATCHES))
-        conn = FakeConn(answers_with(**{"FROM game_periods GROUP BY game_id": [key]}))
+        conn = FakeConn(answers_with(**{"FROM game_periods GROUP BY game_id": [key + (True,)]}))
         self.assertEqual(sc.check_period_sums(conn), [])
 
     def test_a_new_mismatch_is_reported_alongside_an_acknowledged_one(self):
         key = next(iter(sc.ACKNOWLEDGED_PERIOD_MISMATCHES))
-        conn = FakeConn(answers_with(**{"FROM game_periods GROUP BY game_id": [key, ("NFL", "999")]}))
+        conn = FakeConn(answers_with(**{"FROM game_periods GROUP BY game_id": [key + (True,), ("NFL", "999", True)]}))
         problems = sc.check_period_sums(conn)
         self.assertEqual(len(problems), 1)
         self.assertIn("NFL 999", problems[0])
@@ -156,6 +157,49 @@ class AcknowledgedMismatchTests(unittest.TestCase):
         with self.assertLogs("sports_hub.sanity", level="INFO") as logs:
             self.assertEqual(sc.check_period_sums(conn), [])
         self.assertIn("no longer occurs", "\n".join(logs.output))
+
+
+class PeriodMismatchJudgementTests(unittest.TestCase):
+    """A mismatch is judged by how NEW and how COMMON it is (ESPN is occasionally wrong)."""
+
+    def check(self, rows, totals):
+        conn = FakeConn(answers_with(**{
+            "FROM game_periods GROUP BY game_id": rows,
+            "AND EXISTS (SELECT 1 FROM game_periods": totals,
+        }))
+        return sc.check_period_sums(conn)
+
+    def test_a_new_mismatch_is_reported(self):
+        problems = self.check([("NHL", "111", True)], [("NHL", 500)])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("last 3 days", problems[0])
+        self.assertIn("NHL 111", problems[0])
+
+    def test_an_old_isolated_mismatch_stays_quiet(self):
+        # Reviewed long ago and not new: no nightly alert, however long it stays
+        self.assertEqual(self.check([("NHL", "111", False)], [("NHL", 500)]), [])
+
+    def test_a_high_rate_in_one_league_is_reported_even_if_every_game_is_old(self):
+        old = [("NHL", str(i), False) for i in range(11)]  # 11 of 500 = 2.2%
+        problems = self.check(old, [("NHL", 500)])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("NHL: 11 of 500", problems[0])
+        self.assertIn("ESPN quirk", problems[0])
+
+    def test_the_rate_boundary(self):
+        at_limit = [("NHL", str(i), False) for i in range(10)]  # 10 of 500 = exactly 2%
+        self.assertEqual(self.check(at_limit, [("NHL", 500)]), [])
+        over = [("NHL", str(i), False) for i in range(11)]
+        self.assertEqual(len(self.check(over, [("NHL", 500)])), 1)
+
+    def test_a_small_league_sample_is_not_judged_by_rate(self):
+        # 3 of 40 is 7.5%, but 40 games is too few to call it systemic
+        few = [("NHL", str(i), False) for i in range(3)]
+        self.assertEqual(self.check(few, [("NHL", 40)]), [])
+
+    def test_acknowledged_games_do_not_count_toward_the_rate(self):
+        ack = [key + (False,) for key in sc.ACKNOWLEDGED_PERIOD_MISMATCHES if key[0] == "NHL"]
+        self.assertEqual(self.check(ack, [("NHL", len(ack) + 1)]), [])
 
 
 class RowCountTests(unittest.TestCase):
@@ -192,7 +236,7 @@ class RunSanityChecksTests(unittest.TestCase):
 
     def test_each_failed_check_becomes_one_warning(self):
         answers = answers_with(**{
-            "FROM game_periods GROUP BY game_id": [("NFL", "111")],
+            "FROM game_periods GROUP BY game_id": [("NFL", "111", True)],
             "max(last_updated)": [(True,)],
         })
         report = RunReport("t_sane_bad")
