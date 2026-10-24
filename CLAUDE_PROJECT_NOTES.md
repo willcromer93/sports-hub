@@ -727,3 +727,17 @@ Audited this repo plus the two static sites (`willcromer93.github.io`, `links`).
 **Test-suite gotcha:** several test files point `LOG_DIR` at their own temp folder when imported, but `log_setup.LOG_DIR` is read once, by whichever test file imports it first (alphabetical order decides). A new file sorting before `test_run_report.py` broke that test; it now asks `run_report.LOG_DIR` where it really writes. Verified in two import orders.
 
 **Next:** D2 on staging: create `sports_hub_staging` (one sudo command), trial-run `LEAGUES_ALL=NBA,NFL,NHL`, run the gate for each, then enable on live after Will confirms. Phase E (full redesign of the site and its tabs, requested by Will) follows once the leagues are loading.
+
+### 2026-10-24 — End of session: where things stand
+
+**Live and healthy:** homelab runs the D1 engine (commit `9d5d463`) nightly at 4 AM; only the four featured teams are collected (`LEAGUES_ALL` is not set). Backups (3:30 AM), weekly refresh and restore test, alerts (ntfy + healthchecks), and the public site all verified. Last run 2026-10-24 00:14: ok, 25 steps, 0 errors, 0 warnings.
+
+**Not yet done (waiting on Will's sudo, run on homelab):**
+1. `sudo systemctl restart sports-hub-dashboard`: the running dashboard still has the Phase C code loaded. It works unchanged with the new database (it still reads `is_tracked`, which is the same four teams), but the new code (`featured_teams()` / `is_featured`) only loads after a restart.
+2. Create the permanent practice database for D2 (the scratch DB is wiped every Sunday by the restore test): `CREATE DATABASE sports_hub_staging OWNER <app role> TEMPLATE template0 ENCODING 'UTF8' LOCALE 'en_US.UTF-8'`, using the `sudo -u postgres psql -v owner="$DB_USER" <<'SQL' ... SQL` pattern from the README.
+
+**Unpushed locally:** commit `d8744df` (league gate tool and `min_roster`; the server doesn't need it until D2).
+
+**Morning checklist:** `logs/last_pipeline.json` should show a 04:00 start with status ok and `sanity problems` 0; the healthchecks.io check should be green; `logs/backup.log` should have a 03:30 line.
+
+**Next session, in order:** (1) the two sudo steps above; (2) D2: restore a copy of live data into `sports_hub_staging`, trial-run `LEAGUES_ALL=NBA,NFL,NHL` there (about 94 teams, expect about 6 to 8 minutes), judge each league with `league_gate.py`, then ask Will before adding them to `LEAGUES_ALL` on the live server; (3) D3 WNBA, D4 college basketball (362 teams; weekly roster refresh and season-aware schedule fetching), D5 college football (FBS, 138), D6 MLB (new box-score parser; extend the case-sensitive `NON_ADDITIVE_STAT_PATTERN` for `AVG/OBP/SLG/ERA/OPS/WHIP` first); (4) **Phase E: Will's full redesign of the site and its tabs**, starting with design (information architecture, navigation, look) before building; (5) housekeeping: rotate the ntfy topic (it appeared in a screenshot), optional extra healthchecks, a UPS, push the remaining commit.
