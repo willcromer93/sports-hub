@@ -36,46 +36,57 @@ def get_readonly_connection():
     )
 
 
-def insert_team(
-    conn,
-    league,
-    external_id,
-    name,
-    espn_id=None,
-    venue=None,
-    city=None,
-    capacity=None,
-    founded_year=None,
-):
+def upsert_league_team(conn, league, espn_id, name, featured=False, founded_year=None):
     """
-    Insert one of our tracked teams into the teams table.
-    If a team with the same (league, external_id) already exists,
-    update its enrichment fields and updated_at timestamp instead of erroring out.
+    Insert or refresh a team we collect full data for (rosters, schedules, box
+    scores, rollups), keyed on (league, espn_id). This is how every team in a
+    fully collected league gets its row, and how the featured teams are refreshed.
+
+    On a conflict it updates the name and marks the team tracked, but keeps what's
+    already stored: external_id and venue are never touched, a stored founded_year
+    is kept when none is given, and is_featured is only ever switched ON here
+    (a team stops being featured by a deliberate UPDATE, not by a nightly run).
     Returns the team_id.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO teams (league, external_id, name, espn_id, is_tracked,
-                               venue, city, capacity, founded_year)
-            VALUES (%s, %s, %s, %s, true, %s, %s, %s, %s)
-            ON CONFLICT (league, external_id)
+            INSERT INTO teams (league, espn_id, name, is_tracked, is_featured, founded_year)
+            VALUES (%s, %s, %s, true, %s, %s)
+            ON CONFLICT (league, espn_id)
             DO UPDATE SET
                 name = EXCLUDED.name,
-                espn_id = COALESCE(EXCLUDED.espn_id, teams.espn_id),
                 is_tracked = true,
-                venue = EXCLUDED.venue,
-                city = EXCLUDED.city,
-                capacity = EXCLUDED.capacity,
-                founded_year = EXCLUDED.founded_year,
+                is_featured = teams.is_featured OR EXCLUDED.is_featured,
+                founded_year = COALESCE(EXCLUDED.founded_year, teams.founded_year),
                 updated_at = now()
             RETURNING team_id;
             """,
-            (league, external_id, name, espn_id, venue, city, capacity, founded_year),
+            (league, espn_id, name, featured, founded_year),
         )
         team_id = cur.fetchone()[0]
     conn.commit()
     return team_id
+
+
+def set_team_venue(conn, team_id, venue, city):
+    """
+    Record a team's venue and city. A missing value (None) keeps what is stored,
+    so a source that lacks venue data never erases it: ESPN has none for college
+    basketball, and Purdue's Mackey Arena / West Lafayette were entered by hand.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE teams
+            SET venue = COALESCE(%s, venue),
+                city = COALESCE(%s, city),
+                updated_at = now()
+            WHERE team_id = %s;
+            """,
+            (venue, city, team_id),
+        )
+    conn.commit()
 
 
 def upsert_opponent_team(conn, league, espn_id, name):
@@ -223,10 +234,15 @@ def insert_player(
 
 
 def count_on_roster(conn, team_id):
-    """How many players are currently marked as on this team's roster."""
+    """How many players are currently on this team's roster: confirmed by a roster pull
+    (last_seen_at is set) and not departed. A player known only from a box score has no
+    last_seen_at, so was never confirmed on a roster and doesn't count."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT count(*) FROM players WHERE team_id = %s AND departed_at IS NULL;",
+            """
+            SELECT count(*) FROM players
+            WHERE team_id = %s AND departed_at IS NULL AND last_seen_at IS NOT NULL;
+            """,
             (team_id,),
         )
         return cur.fetchone()[0]
@@ -241,8 +257,10 @@ def get_db_now(conn):
 
 
 def find_departing_players(conn, team_id, cutoff):
-    """Players marked on this team's roster who were NOT seen since `cutoff`,
-    i.e. missing from tonight's roster. Returns [(player_id, name, position)].
+    """Players confirmed on this team's roster before tonight (last_seen_at is set)
+    who were NOT seen since `cutoff`, i.e. missing from tonight's roster. Players known
+    only from box scores (no last_seen_at) were never on a roster pull, so can't have
+    left one. Returns [(player_id, name, position)].
     Read-only: nothing is marked until mark_players_departed() is called."""
     with conn.cursor() as cur:
         cur.execute(
@@ -251,7 +269,8 @@ def find_departing_players(conn, team_id, cutoff):
             FROM players
             WHERE team_id = %s
               AND departed_at IS NULL
-              AND COALESCE(last_seen_at, '-infinity') < %s
+              AND last_seen_at IS NOT NULL
+              AND last_seen_at < %s
             ORDER BY name;
             """,
             (team_id, cutoff),

@@ -120,5 +120,76 @@ class RunReportTests(unittest.TestCase):
         self.get.assert_not_called()
 
 
+class EachTests(unittest.TestCase):
+    """RunReport.each(): per-item isolation with a failure threshold."""
+
+    def setUp(self):
+        for var in ("NTFY_TOPIC", "HEALTHCHECK_URL"):
+            os.environ.pop(var, None)
+
+    @staticmethod
+    def failing_on(bad):
+        def work(item):
+            if item in bad:
+                raise RuntimeError(f"boom {item}")
+            return item * 2
+        return work
+
+    def test_all_succeed_is_one_ok_step_and_returns_results(self):
+        report = RunReport("t_each_ok")
+        results = report.each("rosters", [1, 2, 3], lambda i: i * 2)
+        self.assertEqual(results, [(1, 2), (2, 4), (3, 6)])
+        self.assertEqual((report.errors, report.warnings), ([], []))
+        self.assertEqual(report.ok_steps, ["rosters"])
+
+    def test_one_failure_in_a_hundred_is_a_single_warning_and_the_rest_still_run(self):
+        conn = FakeConn()
+        report = RunReport("t_each_warn", conn=conn)
+        results = report.each("rosters", range(100), self.failing_on({7}), name=lambda i: f"team{i}")
+        self.assertEqual(len(results), 99)  # everyone else was processed
+        self.assertEqual(report.errors, [])
+        self.assertEqual(len(report.warnings), 1)
+        label, message = report.warnings[0]
+        self.assertEqual(label, "rosters")
+        self.assertIn("1 of 100 failed", message)
+        self.assertIn("team7", message)
+        self.assertEqual(conn.rollbacks, 1)
+        self.assertIn("rosters", report.ok_steps)
+
+    def test_ten_percent_failing_is_one_error_not_ten(self):
+        report = RunReport("t_each_err")
+        report.each("rosters", range(100), self.failing_on(set(range(10))))
+        self.assertEqual(len(report.errors), 1)
+        self.assertIn("10 of 100 failed", report.errors[0][1])
+        self.assertEqual(report.warnings, [])
+
+    def test_a_single_item_that_fails_is_an_error(self):
+        # The featured-team case: 1 of 1 failing is 100%, never a quiet warning
+        report = RunReport("t_each_one")
+        report.each("Colts roster", ["colts"], lambda i: 1 / 0)
+        self.assertEqual(len(report.errors), 1)
+        self.assertIn("1 of 1 failed", report.errors[0][1])
+
+    def test_exactly_at_the_threshold_is_a_warning(self):
+        report = RunReport("t_each_edge")
+        report.each("x", range(100), self.failing_on(set(range(5))))  # 5% exactly
+        self.assertEqual(report.errors, [])
+        self.assertEqual(len(report.warnings), 1)
+
+    def test_only_a_few_failures_are_named(self):
+        report = RunReport("t_each_names")
+        report.each("x", range(100), self.failing_on(set(range(10))), name=lambda i: f"t{i}")
+        message = report.errors[0][1]
+        self.assertIn("t0", message)
+        self.assertIn("and 7 more", message)
+        self.assertNotIn("t9", message)
+
+    def test_ctrl_c_is_not_swallowed(self):
+        def interrupted(item):
+            raise KeyboardInterrupt()
+        with self.assertRaises(KeyboardInterrupt):
+            RunReport("t_each_kbd").each("x", [1], interrupted)
+
+
 if __name__ == "__main__":
     unittest.main()

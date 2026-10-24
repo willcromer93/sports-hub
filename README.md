@@ -37,6 +37,9 @@ SPORTS-HUB/
 │ ├── http_client.py # fetch_json(): every API call goes through it (timeouts, retries, clear errors)
 │ ├── log_setup.py # Logging setup: timestamped, rotating files in logs/
 │ ├── run_report.py # RunReport: isolates failed steps, writes the summary + last_<job>.json, alerts
+│ ├── leagues.py # The league registry (7 leagues), featured teams, and the LEAGUES_ALL setting
+│ ├── team_discovery.py # Lists every team in a league from ESPN, with safety checks (floor count, no duplicates)
+│ ├── check_leagues.py # Read-only: asks ESPN what each league lists (run it before enabling a league)
 │ ├── roster_tracking.py # The rule for marking departed players (and its safety guard); no database code
 │ ├── sanity_checks.py # Post-run checks on the finished data (duplicates, scores, box scores, row counts, freshness)
 │ ├── notify.py # Phone alerts (ntfy) and "did it run?" pings (healthchecks.io), for Python
@@ -51,6 +54,7 @@ SPORTS-HUB/
 │ ├── stat_rollups_season_type.sql # Adds season_type to season/career rollups; season -> season_year
 │ ├── appearances_team_id.sql # Adds team_id to player_game_appearances so opponents' box scores can be stored
 │ ├── players_roster_tracking.sql # Adds last_seen_at / departed_at to players (roster departure tracking)
+│ ├── teams_is_featured.sql # Adds teams.is_featured: the four dashboard teams, separate from is_tracked
 │ └── dashboard_ro_role.sql # Creates the SELECT-only dashboard_ro Postgres role used by the public dashboard
 ├── tests/ # Unit tests (run: venv/bin/python -m unittest discover -s tests)
 ├── requirements.txt # Exact package versions (pip freeze of the production venv)
@@ -88,9 +92,7 @@ To start a fresh venv first: `python3 -m venv venv && source venv/bin/activate`.
 
 ### 3. Environment Variables
 
-Create a `.env` file in the project root (if not already present) with:
-
-BALLDONTLIE_KEY=your_api_key_here
+Create a `.env` file in the project root (if not already present) with (`.env.example` lists every setting):
 
 DB_HOST=localhost
 DB_PORT=5432
@@ -99,7 +101,8 @@ DB_USER=your_mac_username
 DB_PASSWORD=your_postgres_password
 
 
-- `BALLDONTLIE_KEY` is required for [balldontlie.io](https://www.balldontlie.io/) API calls (used for NBA/NCAAB team identity).
+- `LEAGUES_ALL` (optional) lists the leagues where every team is collected, e.g. `LEAGUES_ALL=NBA,NFL`. Leave it out and only the four featured teams are collected. See "Leagues and teams".
+- The pipeline no longer uses balldontlie.io, so a `BALLDONTLIE_KEY` left in an old `.env` is harmless and can be deleted.
 - `DB_*` variables connect `scripts/db.py` to your local Postgres database.
 - `DASHBOARD_DB_USER` / `DASHBOARD_DB_PASSWORD` (optional locally, **required on the server**) are the read-only role the dashboard connects with. Create the role with `sql/dashboard_ro_role.sql`. Without them the dashboard falls back to the read-write `DB_*` credentials.
 
@@ -117,6 +120,7 @@ psql -h localhost -d sports_hub -f sql/games_season_type.sql
 psql -h localhost -d sports_hub -f sql/stat_rollups_season_type.sql
 psql -h localhost -d sports_hub -f sql/appearances_team_id.sql
 psql -h localhost -d sports_hub -f sql/players_roster_tracking.sql   # run right after a nightly pull (it refuses to run on stale data)
+psql -h localhost -d sports_hub -f sql/teams_is_featured.sql
 ```
 
 ## Scripts
@@ -127,26 +131,20 @@ Holds the database connection and insert logic, using `psycopg2` directly (not a
 
 - `get_connection()` — opens a read-write connection to the `sports_hub` Postgres database using the `DB_*` credentials in `.env`. Used by the pipeline scripts.
 - `get_readonly_connection()` — used by the dashboard. Connects as the `dashboard_ro` role when `DASHBOARD_DB_USER` is set; otherwise falls back to `get_connection()`.
-- `insert_team(conn, league, external_id, name, espn_id=None, venue=None, city=None, capacity=None, founded_year=None)` — upserts one of the four **tracked** teams into `teams` (keyed on `league` + `external_id`) and marks it `is_tracked = true`. Safe to call repeatedly; updates existing rows instead of erroring on duplicates. `capacity` exists as a column but is intentionally left unpopulated (ESPN doesn't return it reliably across sports).
+- `upsert_league_team(conn, league, espn_id, name, featured=False, founded_year=None)` — upserts a team we collect full data for, keyed on `league` + `espn_id`, and marks it `is_tracked`. On a conflict it keeps what is stored: `external_id` and venue are never touched, a stored `founded_year` is kept when none is given, and `is_featured` is only ever switched on. Safe to call repeatedly. The `capacity` column exists but is intentionally left unpopulated (ESPN doesn't return it reliably across sports).
+- `set_team_venue(conn, team_id, venue, city)` — records a team's venue and city, keeping the stored values when given `None`, so a source without venue data (ESPN has none for college basketball) never erases it.
 - `upsert_opponent_team(conn, league, espn_id, name)` — upserts an **opponent** team (keyed on `league` + `espn_id`) so games can reference it. Only updates name/timestamp, never tracked-team fields.
 - `insert_player(conn, team_id, league, external_id, name, position, ...)` — upserts a row into `players`, with a large set of optional enrichment fields (height, weight, jersey number, birth info, college, contract summary, injury status, headshot URL, draft info). Safe to call repeatedly.
 
 ### `scripts/api_pulls.py`
 
-Pulls team and player data for all four teams and loads it into Postgres. **Safe to rerun anytime** — every insert is an upsert, so re-running won't create duplicate rows, only refresh existing ones. Each stage below runs as an isolated step (see "Monitoring and alerts"): if one fails, the rest still run, an alert is sent, and the script exits 1.
-
-| Team | League | Team Identity Source | Player Roster Source |
-|------|--------|-------------------|------------------------|
-| Indiana Pacers | NBA | balldontlie.io | ESPN roster API |
-| Purdue | NCAAB | balldontlie.io | ESPN roster API |
-| Detroit Red Wings | NHL | Hardcoded (`DET`; venue/city from ESPN) | ESPN roster API |
-| Indianapolis Colts | NFL | ESPN Site API | ESPN roster API |
+Pulls team, player and game data and loads it into Postgres. **Safe to rerun anytime** — every insert is an upsert, so re-running won't create duplicate rows, only refresh existing ones. Which teams are collected comes from the league registry (see "Leagues and teams"): every team in the leagues named in `LEAGUES_ALL`, plus the four featured teams (Pacers, Purdue, Red Wings, Colts) in the others. Per-team work runs through `report.each(...)` and everything else as an isolated step (see "Monitoring and alerts"): if one fails, the rest still run, an alert is sent, and the script exits 1.
 
 **What it does:**
-1. Loads API keys/DB credentials from `.env` and opens a Postgres connection.
-2. Pulls team identity for all four teams from their respective sources and upserts into `teams`, along with venue/city/founded_year enrichment (venue/city sourced from ESPN's team endpoint for NBA/NHL/NFL; hardcoded for Purdue, since ESPN's college basketball endpoint doesn't return venue data. `founded_year` is hardcoded for all four teams — no API provides it).
-3. Pulls full player rosters for all four teams from ESPN's roster endpoint (`site.api.espn.com/apis/site/v2/sports/{sport}/{league}/teams/{team_id}/roster`) and upserts into `players`, including physical stats, birth info, college, contract summary (current season + total value/years/expiration), injury status, and headshot URL.
-4. Pulls each team's preseason, regular-season, and postseason schedules from ESPN (`.../teams/{team_id}/schedule?seasontype=1|2|3`) and upserts every game into `games`. Each opponent is upserted into `teams` first (as an untracked team) so the game's home/away team IDs have a row to point at. Reruns refresh status, scores, and schedule changes in place.
+1. Loads settings from `.env` and opens a Postgres connection (a typo in `LEAGUES_ALL` stops the run instead of guessing).
+2. For each league (in registry order, which keeps database ids stable), makes sure every collected team has a row in `teams`: featured teams are refreshed from ESPN's team detail page (name, venue, city; the config's venue is used only when ESPN has none), and in a fully collected league every team ESPN lists is found by `team_discovery.discover_teams()` and upserted by `(league, espn_id)`. `founded_year` is recorded for the featured teams only, since no API provides it.
+3. Pulls each team's full roster from ESPN's roster endpoint (`site.api.espn.com/apis/site/v2/sports/{sport}/{league}/teams/{espn_id}/roster`; flat or grouped by position, detected automatically) and upserts into `players`, including physical stats, birth info, college, contract summary, injury status and headshot URL, then marks departed players (see "Roster departures").
+4. Pulls each team's preseason, regular-season, and postseason schedules from ESPN (`.../teams/{espn_id}/schedule?seasontype=1|2|3`) and upserts every game into `games`. Each opponent not already known is upserted into `teams` first (untracked) so the game's home/away team IDs have a row to point at. Reruns refresh status, scores, and schedule changes in place.
 5. For every final game that doesn't have per-period scores yet, calls ESPN's `summary?event={id}` endpoint and fills in `game_periods` (regulation, overtime, and shootout rows). Only new finals are requested, so most nights this is a handful of calls.
 6. For every final game that doesn't have a box score yet, uses the same `summary` endpoint to fill in `player_game_appearances` (did play, seconds played) and `player_game_stats` (one row per stat) for **both teams' players** — ours and the opponent's, each side filled in separately if missing.
 7. Rebuilds `player_season_stats` and `player_career_stats` from `player_game_stats` (additive stats only — see `Schema.md`).
@@ -206,6 +204,43 @@ results or stat tables opens that game or player.
 
 To add a page, create `dashboard/views/<name>.py` and add a line to the `pages`
 list in `dashboard/app.py`.
+
+## Leagues and teams
+
+The project is built to collect **7 leagues**: NBA, NCAAB (men's D1 college basketball), NHL, NFL, WNBA, MLB and CFB (college football, FBS only). The registry in `scripts/leagues.py` describes each one (ESPN path, how to list its teams, and a minimum plausible team count). Which leagues have **every team** collected is the `LEAGUES_ALL` setting in `.env`:
+
+```
+LEAGUES_ALL=NBA,NFL       # collect every team in these leagues
+                          # (leave it out: only the four featured teams are collected)
+```
+
+- **Featured teams** (`teams.is_featured`: Pacers, Purdue, Red Wings, Colts) are the teams the dashboard is built around. They are always collected, even in a league that isn't in `LEAGUES_ALL`.
+- **Tracked teams** (`teams.is_tracked`) are the teams we collect full data for (rosters, schedules, box scores, rollups). Turning a league on never changes the dashboard: its pickers and pages read `is_featured`.
+- Turning a league **off** (removing it from `LEAGUES_ALL`) stops collecting it but leaves its data and its `is_tracked` flags in place.
+
+**Before enabling a league**, check it:
+
+```bash
+venv/bin/python scripts/check_leagues.py            # all 7 leagues
+venv/bin/python scripts/check_leagues.py NBA WNBA   # just these
+```
+
+It is read-only (ESPN only, no database) and fails if a league lists fewer teams than expected. Then try the league on a copy of the database first (never first on live data), and work through this gate before adding it to `LEAGUES_ALL` on the server:
+
+1. Team count equals what ESPN lists, and every roster is non-empty and plausible.
+2. Every final game has a box score, and period scores add up to the final score for 99%+ of games (known ESPN errors go in `ACKNOWLEDGED_PERIOD_MISMATCHES` with the reason).
+3. Every stat name has been reviewed for "can it be summed?" (rates such as batting average or ERA cannot), so rollups stay correct.
+4. Rollup totals match an independent re-aggregation of the box scores.
+5. Request count and run time are within budget, and all sanity checks are clean.
+6. The featured teams' dashboard pages are unchanged.
+
+**Traps found by probing ESPN** (all defended against in `team_discovery.py` and covered by tests):
+- The teams endpoint returns only the **first 50 teams** unless `limit` is passed, with no count or paging field, so a truncated list looks complete. Every list is requested with `limit=1000` and must reach the league's `min_teams` floor.
+- College football's team list has **762 teams** of every level and ignores a division filter; the 138 FBS teams come from ESPN's FBS standings.
+- ESPN's scoreboard rejects date ranges (HTTP 400) and **college scoreboards hide about half the games by default**, so the nightly schedule sync uses per-team schedules, which are complete by construction.
+- Numeric team ids work everywhere an abbreviation does (the Colts' `ind` is not needed).
+
+**Adding a league** means adding an entry to `LEAGUES` (and a parser if its box-score format is new: WNBA and college basketball reuse the NBA's, college football reuses the NFL's, MLB needs its own), then following the gate above. The first four leagues in the registry (NBA, NCAAB, NHL, NFL) must stay first and in that order: database rows are numbered in insertion order, so changing it would change ids.
 
 ## Running in production (home lab server)
 
@@ -311,7 +346,7 @@ Three layers, so a problem reaches your phone whether a job *fails* or *never ru
 
 | Layer | Catches | How |
 |---|---|---|
-| **Step isolation** (`RunReport`) | One API outage or format change | Each unit of work (a team, its roster, its games, box scores, rollups) runs in its own `report.step(...)`. A failure is logged with its traceback and the rest still runs. The job exits 1 if any step failed. |
+| **Step isolation** (`RunReport`) | One API outage or format change | Each unit of work (a league's teams, box scores, rollups) runs in its own `report.step(...)`, and per-team work (rosters, schedules) runs through `report.each(...)`. A failure is logged with its traceback and the rest still runs. `each` tolerates a few failures out of many: up to 5% of the teams failing is ONE warning naming them ("3 of 362 failed: ..."); more is ONE error. The job exits 1 if any step failed. |
 | **Phone alert** (ntfy) | A failed step, or a suspicious empty result (a roster or schedule returning 0 items) | `notify.py` / `notify.sh` POST a short message to your private ntfy topic. It says *what* failed, never data. Failures only; a clean run is silent. |
 | **"Did it run?" check** (healthchecks.io) | Cron not firing, the server down, the job hanging | After a good run the job pings its check. A missing ping alerts you (email and ntfy). The check's schedule is `0 4 * * *` America/Indiana/Indianapolis with a 2-hour grace time. |
 
@@ -323,13 +358,13 @@ Three layers, so a problem reaches your phone whether a job *fails* or *never ru
 - `logs/*.cron.log`: only crashes that happen before logging starts (e.g. an import error).
 - `journalctl -u sports-hub-dashboard`: the dashboard.
 
-**Roster departures.** Each nightly roster pull marks players who were on a team's roster but are missing tonight as departed (`players.departed_at`), instead of leaving them looking current forever. Rows are never deleted. A safety rule (`roster_tracking.py`) refuses to record anything when ESPN returns an empty roster or one under 50% of the previous size, and raises a warning, so a bad response can't wipe a roster. A real mass cutdown (about 90 to 53 players) goes through, with an informational alert if more than 25% leave at once. A player who reappears is automatically marked back on the roster. The dashboard treats a player as "on the roster" only if `departed_at IS NULL`.
+**Roster departures.** Each nightly roster pull marks players who were on a team's roster but are missing tonight as departed (`players.departed_at`), instead of leaving them looking current forever. Rows are never deleted. A safety rule (`roster_tracking.py`) refuses to record anything when ESPN returns an empty roster or one under 50% of the previous size, and raises a warning, so a bad response can't wipe a roster. A real mass cutdown (about 90 to 53 players) goes through, with an informational alert if more than 25% leave at once. A player who reappears is automatically marked back on the roster. A player known only from a box score (never on a roster pull) is neither on the roster nor "departed". The dashboard treats a player as "on the roster" only if `last_seen_at IS NOT NULL AND departed_at IS NULL`.
 
 **Sanity checks** run at the end of every nightly run (`sanity_checks.py`) and look at the finished data, not at the steps: exactly the expected number of tracked teams with no duplicates; every game involves a tracked team; every final game has both scores; per-period scores add up to the final score; final games older than 36 h have a box score; the schedule pull touched at least one game during this run; and no append-only table has fewer rows than after the previous run. A failure becomes a warning (phone alert) and does not fail the run. Known upstream errors that can't be fixed (e.g. an ESPN line score that contradicts its own final score) go in `ACKNOWLEDGED_PERIOD_MISMATCHES` with the reason, so they don't alert every night; the check logs a note if ESPN later fixes one so the entry can be removed.
 
 **API calls** all go through `http_client.fetch_json()`: 5 s connect and 30 s read timeouts, up to 3 retries (waits of 1, 2, 4 s, honoring `Retry-After`) for timeouts, dropped connections, HTTP 429 and 5xx, a 0.2 s pause between calls, and a clear `FetchError` naming the URL if it still fails. A 404 isn't retried.
 
-**Tests:** `venv/bin/python -m unittest discover -s tests -v` (39 tests, about 3 seconds). They run a throwaway local web server that returns 500s, 404s, garbage JSON and slow replies, and check the retry, timeout and alert logic without touching any real API.
+**Tests:** `venv/bin/python -m unittest discover -s tests -v` (70 tests, about 3 seconds). They run a throwaway local web server that returns 500s, 404s, garbage JSON and slow replies, and check the retry, timeout and alert logic without touching any real API.
 
 **Failure drill** (run after changing this machinery): on a throwaway copy, break something on purpose (an unreachable API URL, a wrong database name, a bad `.env` password) and confirm that the run exits 1, the other steps still run, a message reaches your phone, and the healthchecks.io check goes red. Never test against the live `.env` values without telling yourself first, since the alerts are real.
 
@@ -350,13 +385,13 @@ The dashboard is public (Tailscale Funnel, no login), so it is set up to do as l
 
 ## API Notes
 
-- **balldontlie.io** — requires an `Authorization` header with your API key. Used for NBA/NCAAB team identity only (kept stable/unchanged from original inserts — see note below). Its `/players` endpoint returns historically-associated players rather than current roster, and its `/players/active` endpoint (which would fix that) requires a paid tier — so player rosters are pulled from ESPN instead.
+- **balldontlie.io** — no longer used. The pipeline used to take the Pacers' and Purdue's team identity from it (their `external_id` values still come from it); teams are now matched by ESPN id, so `BALLDONTLIE_KEY` is not needed. Its `/players` endpoint returned historically-associated players rather than the current roster, and its `/players/active` endpoint needs a paid tier, which is why rosters come from ESPN.
 - **NHL API** (`api-web.nhle.com`) — public, no auth required. No longer called: the pipeline used to fetch the Red Wings schedule from it but never used the result, and removing the call means an NHL API outage can't break the nightly run.
 - **ESPN API** (`site.api.espn.com`) — public, no auth required, unofficial (may change without notice). Primary source for player rosters across all sports, and for venue/city team enrichment (pro leagues only). Response shape varies noticeably by sport:
-  - NBA/NCAAB rosters are a flat player list; NFL/NHL rosters are grouped by position category, requiring a nested loop.
+  - NBA/WNBA/college basketball rosters are a flat player list; NFL/NHL/MLB/college football rosters are grouped by position category, requiring a nested loop (detected automatically).
   - Venue data lives at `team.franchise.venue` for NBA/NHL/NFL; the college basketball team endpoint doesn't return venue data at all.
 
-**Important — team `external_id` stability:** Pacers/Purdue keep their original balldontlie-sourced `external_id` values, and Red Wings keeps `"DET"`. These are never changed to an ESPN ID, even though ESPN is used for enrichment — changing a team's `external_id` would break the `ON CONFLICT (league, external_id)` upsert match and create a duplicate row rather than updating the existing team. (This exact bug happened once with the Colts during Pi migration and was manually cleaned up — see `CLAUDE_PROJECT_NOTES.md`, 2026-08-30.)
+**Team identity:** teams are matched by `(league, espn_id)`, which is unique and is the key the nightly run uses, so `external_id` is never written by it. The four featured teams keep their original `external_id` values (Pacers 12, Purdue 125, Red Wings `DET`, Colts 11), and ESPN's team ids collide with them across leagues (ESPN NBA 12 is the Clippers while 12 is the Pacers' `external_id`), so never match on `external_id` with an ESPN id. A duplicate tracked team (this happened once with the Colts, 2026-08-30) is caught by the nightly sanity checks.
 
 ## Roadmap / Ideas
 
@@ -380,6 +415,9 @@ The dashboard is public (Tailscale Funnel, no login), so it is set up to do as l
 - [x] Weekly re-check of recent games for ESPN stat corrections (`refresh_stats.py`)
 - [x] Build the Streamlit dashboard (first version)
 - [x] Make the dashboard publicly reachable (Tailscale Funnel, free; no custom domain)
+- [x] Phase D1: league registry, automatic team discovery, `is_featured`, per-team failure tolerance (no new leagues; output proven identical)
+- [ ] Phase D2-D6: collect every team: NBA/NFL/NHL, then WNBA, college basketball, college football (FBS), MLB (needs a new box-score parser)
+- [ ] Phase E: dashboard league and team pickers for hundreds of teams
 - [ ] Cloudflare Tunnel + own domain, if a nicer URL or login-protected access is ever wanted
 
 ## Dev Tools

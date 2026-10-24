@@ -8,14 +8,10 @@ don't touch the database.
 """
 
 from http_client import fetch_json
+from leagues import LEAGUES
 
-# League -> ESPN URL path segment
-SPORT_PATHS = {
-    "NBA": "basketball/nba",
-    "NCAAB": "basketball/mens-college-basketball",
-    "NHL": "hockey/nhl",
-    "NFL": "football/nfl",
-}
+# League -> ESPN URL path segment (the registry in leagues.py is the one source)
+SPORT_PATHS = {code: league.sport_path for code, league in LEAGUES.items()}
 
 
 def fetch_summary(league, event_id):
@@ -76,7 +72,7 @@ PLAYING_TIME_KEYS = {"minutes", "timeOnIce"}
 # passing but caught under defensive — so NFL stat names get the category as a
 # prefix, e.g. "passing.interceptions". NHL groups are positions (forwards,
 # goalies), and a player is only ever in one, so no prefix is needed there.
-STAT_GROUP_PREFIX_LEAGUES = {"NFL"}
+STAT_GROUP_PREFIX_LEAGUES = {"NFL", "CFB"}  # college football uses the same categories as the NFL
 
 
 def parse_stat_value(raw):

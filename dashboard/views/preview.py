@@ -53,7 +53,7 @@ game = upcoming.set_index("game_id").loc[game_id]
 
 # --- Live preview from ESPN (nothing stored; cached for an hour) --------------
 preview = data.pregame(league, game["external_id"])
-our_espn_id = data.tracked_teams().set_index("name").loc[team_name, "espn_id"]
+our_espn_id = data.featured_teams().set_index("name").loc[team_name, "espn_id"]
 if preview:
     ours = preview.get(our_espn_id, {})
     theirs = next((t for tid, t in preview.items() if tid != our_espn_id), {})

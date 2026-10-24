@@ -63,8 +63,9 @@ class FakeConn:
 
 # A healthy database: every check passes
 HEALTHY = [
-    ("count(*) FROM teams WHERE is_tracked", [(4,)]),
     ("HAVING count(*) > 1", []),
+    ("GROUP BY league;", [("NBA", 1), ("NCAAB", 1), ("NHL", 1), ("NFL", 1)]),
+    ("WHERE is_featured", [("NBA", "11"), ("NCAAB", "2509"), ("NHL", "5"), ("NFL", "11")]),
     ("WHERE NOT EXISTS ( SELECT 1 FROM teams t", []),
     ("home_score IS NULL OR away_score IS NULL", []),
     ("FROM game_periods GROUP BY game_id", []),
@@ -72,6 +73,10 @@ HEALTHY = [
     ("max(last_updated)", [(False,)]),
     ("SELECT count(*) FROM", [(10,)]),
 ]
+
+
+EXPECTED = {"NBA": 1, "NCAAB": 1, "NHL": 1, "NFL": 1}  # tracked teams per league
+FEATURED = {("NBA", "11"), ("NCAAB", "2509"), ("NHL", "5"), ("NFL", "11")}
 
 
 def answers_with(**overrides):
@@ -82,18 +87,38 @@ def answers_with(**overrides):
 
 
 class IndividualCheckTests(unittest.TestCase):
-    def test_tracked_team_count_must_match(self):
-        conn = FakeConn(answers_with(**{"count(*) FROM teams WHERE is_tracked": [(5,)]}))
-        self.assertEqual(sc.check_tracked_teams(conn, 4), ["5 tracked teams, expected 4"])
+    def test_tracked_team_count_must_match_per_league(self):
+        conn = FakeConn(answers_with(**{"GROUP BY league;": [("NBA", 31), ("NCAAB", 1), ("NHL", 1), ("NFL", 1)]}))
+        problems = sc.check_tracked_teams(conn, EXPECTED)
+        self.assertEqual(problems, ["NBA: 31 tracked teams, expected 1"])
+
+    def test_a_league_we_did_not_expect_a_count_for_is_skipped(self):
+        # e.g. the NBA team list could not be fetched tonight
+        conn = FakeConn(answers_with(**{"GROUP BY league;": [("NBA", 1)]}))
+        self.assertEqual(sc.check_tracked_teams(conn, {"NBA": 1}), [])
+
+    def test_a_league_with_no_tracked_teams_at_all_is_a_problem(self):
+        conn = FakeConn(answers_with(**{"GROUP BY league;": []}))
+        self.assertEqual(sc.check_tracked_teams(conn, {"NBA": 30}), ["NBA: 0 tracked teams, expected 30"])
+
+    def test_featured_flags_must_match_the_config(self):
+        conn = FakeConn(HEALTHY)
+        self.assertEqual(sc.check_featured_teams(conn, FEATURED), [])
+        extra = FakeConn(answers_with(**{"WHERE is_featured": [("NBA", "11"), ("NBA", "7")]}))
+        problems = sc.check_featured_teams(extra, {("NBA", "11")})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("NBA 7", problems[0])
+        missing = sc.check_featured_teams(FakeConn(HEALTHY), FEATURED | {("MLB", "1")})
+        self.assertIn("MLB 1", missing[0])
 
     def test_duplicate_tracked_team_is_named(self):
         conn = FakeConn(answers_with(**{"HAVING count(*) > 1": [("NFL", "Indianapolis Colts")]}))
-        problems = sc.check_tracked_teams(conn, 4)
+        problems = sc.check_tracked_teams(conn, EXPECTED)
         self.assertIn("NFL Indianapolis Colts", problems[0])
 
     def test_healthy_data_passes_every_check(self):
         conn = FakeConn(HEALTHY)
-        self.assertEqual(sc.check_tracked_teams(conn, 4), [])
+        self.assertEqual(sc.check_tracked_teams(conn, EXPECTED), [])
         self.assertEqual(sc.check_games_have_tracked_team(conn), [])
         self.assertEqual(sc.check_final_games_have_scores(conn), [])
         self.assertEqual(sc.check_period_sums(conn), [])
@@ -160,7 +185,7 @@ class RunSanityChecksTests(unittest.TestCase):
 
     def test_clean_run_has_no_warnings_and_saves_counts(self):
         report = RunReport("t_sane_clean")
-        sc.run_sanity_checks(FakeConn(HEALTHY), report, expected_tracked_teams=4)
+        sc.run_sanity_checks(FakeConn(HEALTHY), report, EXPECTED, FEATURED)
         self.assertEqual((report.errors, report.warnings), ([], []))
         self.assertEqual(report.extra["table_counts"]["games"], 10)
         self.assertEqual(report.counts["sanity problems"], 0)
@@ -171,7 +196,7 @@ class RunSanityChecksTests(unittest.TestCase):
             "max(last_updated)": [(True,)],
         })
         report = RunReport("t_sane_bad")
-        sc.run_sanity_checks(FakeConn(answers), report, expected_tracked_teams=4)
+        sc.run_sanity_checks(FakeConn(answers), report, EXPECTED, FEATURED)
         self.assertEqual(report.errors, [])  # warnings never fail the run
         self.assertEqual(
             sorted(label for label, _ in report.warnings),
@@ -182,7 +207,7 @@ class RunSanityChecksTests(unittest.TestCase):
     def test_a_check_that_itself_breaks_is_an_error_not_silence(self):
         answers = [a for a in HEALTHY if a[0] != "max(last_updated)"]  # no answer: raises
         report = RunReport("t_sane_broken")
-        sc.run_sanity_checks(FakeConn(answers), report, expected_tracked_teams=4)
+        sc.run_sanity_checks(FakeConn(answers), report, EXPECTED, FEATURED)
         self.assertEqual([label for label, _ in report.errors], ["Sanity check: games fresh"])
 
     def test_row_count_shrink_is_warned_using_the_previous_run(self):
@@ -192,7 +217,7 @@ class RunSanityChecksTests(unittest.TestCase):
             )
             report = RunReport("t_sane_shrink")
             with mock.patch.object(sc, "LOG_DIR", d):
-                sc.run_sanity_checks(FakeConn(HEALTHY), report, expected_tracked_teams=4)
+                sc.run_sanity_checks(FakeConn(HEALTHY), report, EXPECTED, FEATURED)
         # Yesterday's games count was 50 and today's database says 10: that's a shrink
         self.assertEqual([label for label, _ in report.warnings], ["Sanity: row counts"])
         self.assertIn("games shrank from 50 to 10 rows", report.warnings[0][1])

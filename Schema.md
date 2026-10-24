@@ -26,20 +26,22 @@ The Pi was brought up to date the same day and its 93 columns match the Mac's ex
    (which side the player was on) and backfills it. Safe to rerun.
 
 ### teams
-One row per team, across all four leagues — our four tracked teams plus
-every opponent they play (added by the games pull as schedules come in), so
-`games.home_team_id`/`away_team_id` always have a row to point at.
+One row per team: every team collected in full (tracked), including the four
+featured teams, plus every opponent they play that isn't collected (added by the
+games pull as schedules come in), so `games.home_team_id`/`away_team_id` always
+have a row to point at.
 
 | Column       | Type        | Notes                                                    |
 |--------------|-------------|----------------------------------------------------------|
 | team_id      | SERIAL PK   |                                                          |
-| league       | TEXT        | 'NBA', 'NCAAB', 'NHL', 'NFL'                             |
-| external_id  | TEXT        | balldontlie/NHL/ESPN identity ID for tracked teams — never change it (see README); NULL for opponents |
+| league       | TEXT        | 'NBA', 'NCAAB', 'NHL', 'NFL', 'WNBA', 'MLB', 'CFB' (see scripts/leagues.py; no database constraint restricts it) |
+| external_id  | TEXT        | legacy identity ID (balldontlie/NHL/ESPN) of the four featured teams; the nightly run never writes it. NULL for every other team |
 | espn_id      | TEXT        | ESPN team ID, used to match schedule/game data to a row. Not interchangeable with external_id — ESPN NBA 12 is the Clippers, but '12' is the Pacers' external_id |
-| is_tracked   | BOOLEAN     | true for our four teams, false (default) for opponents        |
+| is_tracked   | BOOLEAN     | true for teams we collect full data for (rosters, schedules, box scores, rollups); false (default) for opponents |
+| is_featured  | BOOLEAN     | true for the four teams the dashboard is built around (Pacers, Purdue, Red Wings, Colts); the nightly run only ever switches it on. Added by `sql/teams_is_featured.sql` |
 | name         | TEXT        |                                                          |
 | updated_at   | TIMESTAMPTZ | defaults to now(); refreshed on every upsert             |
-| venue        | TEXT        | ESPN for NBA/NHL/NFL; hardcoded for Purdue               |
+| venue        | TEXT        | ESPN team detail where available; ESPN has none for college basketball, so Purdue's is kept from the config. A missing value never erases a stored one |
 | city         | TEXT        | same sourcing as venue                                   |
 | capacity     | INTEGER     | intentionally left NULL — candidate for `DROP COLUMN`    |
 | founded_year | INTEGER     | hardcoded for all four teams                             |
@@ -99,7 +101,9 @@ A safety rule (`scripts/roster_tracking.py`) refuses to mark departures when
 ESPN's roster comes back empty or under half its previous size, so a bad
 response can't wipe a roster. Players on non-tracked (opponent) teams come from
 box scores, not roster pulls, so both columns stay NULL for them.
-"Currently on the roster" means `team_id = X AND departed_at IS NULL`.
+"Currently on the roster" means `team_id = X AND last_seen_at IS NOT NULL AND departed_at IS NULL`: a
+player known only from a box score (no `last_seen_at`) was never confirmed on a roster, so is neither
+on it nor "departed".
 
 ### games
 One row per game, stored home/away style — each game appears once, no

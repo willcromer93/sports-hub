@@ -29,7 +29,7 @@ league = st.session_state["league"]
 season_year = st.session_state.get("season_year")
 season_type = st.session_state.get("season_type")
 
-team = data.tracked_teams().set_index("name").loc[team_name]
+team = data.featured_teams().set_index("name").loc[team_name]
 details = " · ".join(
     str(part)
     for part in [team["venue"], team["city"], f"Est. {team['founded_year']}"]

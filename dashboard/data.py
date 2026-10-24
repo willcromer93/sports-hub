@@ -45,12 +45,14 @@ def run_query(sql, params=None):
 
 
 @st.cache_data(ttl=CACHE_SECONDS)
-def tracked_teams():
+def featured_teams():
+    """The teams the dashboard is built around (teams.is_featured). Every team the
+    pipeline collects is "tracked", but only these appear in the pickers and pages."""
     return run_query(
         """
         SELECT team_id, league, name, espn_id, venue, city, founded_year
         FROM teams
-        WHERE is_tracked
+        WHERE is_featured
         ORDER BY name;
         """
     )
@@ -230,9 +232,11 @@ def players(team_id):
                p.birth_state, p.birth_country, p.experience_years, p.college,
                p.headshot_url, p.shoots_catches, p.contract_salary,
                p.contract_expires, p.injury_status, p.status,
-               (p.team_id = %(team_id)s AND p.departed_at IS NULL) AS on_roster
+               (p.team_id = %(team_id)s AND p.departed_at IS NULL
+                AND p.last_seen_at IS NOT NULL) AS on_roster
         FROM players p
-        WHERE (p.team_id = %(team_id)s AND p.departed_at IS NULL)
+        WHERE (p.team_id = %(team_id)s AND p.departed_at IS NULL
+                AND p.last_seen_at IS NOT NULL)
            OR p.player_id IN (
                 SELECT a.player_id
                 FROM player_game_appearances a

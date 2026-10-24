@@ -30,6 +30,7 @@ from notify import ping_healthcheck, send_alert
 log = logging.getLogger("sports_hub.run_report")
 
 MAX_ALERT_LINES = 5  # keep the phone message short
+MAX_EACH_NAMES = 3  # how many failed items each() names in its one summary line
 
 
 class RunReport:
@@ -69,9 +70,57 @@ class RunReport:
         else:
             self.ok_steps.append(label)
 
+    def each(self, label, items, work, name=str, max_failure_fraction=0.05):
+        """Run work(item) for every item, isolating failures item by item. Meant for
+        "one call per team" jobs, where a few failures out of hundreds are noise but
+        many are an outage:
+
+          - every failure is logged with its traceback and the DB connection is
+            rolled back, then the remaining items still run;
+          - if no item failed, `label` counts as one OK step;
+          - if some failed but no more than max_failure_fraction of them (default 5%),
+            it is ONE warning naming the failures ("3 of 362 failed: ...");
+          - if more failed than that, it is ONE error.
+
+        name(item) says how an item is shown in messages. Returns [(item, result)]
+        for the items that succeeded. (Ctrl+C is deliberately not caught.)"""
+        items = list(items)
+        log.info("START %s (%d items)", label, len(items))
+        results, failed = [], []
+        for item in items:
+            try:
+                results.append((item, work(item)))
+            except Exception as exc:
+                log.exception("FAILED %s: %s", label, name(item))
+                failed.append((name(item), f"{type(exc).__name__}: {exc}"))
+                if self.conn is not None:
+                    try:
+                        self.conn.rollback()
+                    except Exception:
+                        log.exception("Rollback failed after %s: %s", label, name(item))
+        if not failed:
+            self.ok_steps.append(label)
+            return results
+
+        shown = "; ".join(f"{who} ({why[:80]})" for who, why in failed[:MAX_EACH_NAMES])
+        if len(failed) > MAX_EACH_NAMES:
+            shown += f"; and {len(failed) - MAX_EACH_NAMES} more"
+        summary = f"{len(failed)} of {len(items)} failed: {shown}"
+        if len(failed) / len(items) <= max_failure_fraction:
+            self.warn(label, summary)
+            self.ok_steps.append(label)
+        else:
+            log.error("FAILED %s: %s", label, summary)
+            self.errors.append((label, summary))
+        return results
+
     def count(self, key, value):
         """Record a number for the summary, e.g. count("games", 224)."""
         self.counts[key] = value
+
+    def add_count(self, key, amount):
+        """Add to a number in the summary, e.g. departures counted team by team."""
+        self.counts[key] = self.counts.get(key, 0) + amount
 
     def warn(self, label, message):
         """Record something suspicious that did not raise, e.g. a roster that

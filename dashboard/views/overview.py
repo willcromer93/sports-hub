@@ -24,7 +24,7 @@ RESULTS_COUNT = 8
 
 page_header("Sports Hub", "Pacers · Purdue · Red Wings · Colts")
 
-teams = data.tracked_teams().set_index("name")
+teams = data.featured_teams().set_index("name")
 team_names = [name for name in TEAM_ORDER if name in teams.index]
 
 # Every tracked team's games in one table, tagged with the team they belong to.

@@ -57,13 +57,20 @@ def _examples(rows):
 
 
 def check_tracked_teams(conn, expected):
-    """Exactly the expected number of tracked teams, and no duplicates.
-    A duplicate tracked team (e.g. the orphaned Colts row from 2026-08-30) means an
-    upsert stopped matching and is silently creating new rows."""
+    """Each league has the number of tracked teams we expect, with no duplicates.
+    `expected` maps league code -> count (the pipeline fills it in from what it
+    just collected); a league missing from it is skipped, e.g. one whose team
+    list could not be fetched tonight. A duplicate tracked team (e.g. the
+    orphaned Colts row from 2026-08-30) means an upsert stopped matching and is
+    silently creating new rows."""
     problems = []
-    (count,) = _fetch(conn, "SELECT count(*) FROM teams WHERE is_tracked;")[0]
-    if count != expected:
-        problems.append(f"{count} tracked teams, expected {expected}")
+    found = dict(
+        _fetch(conn, "SELECT league, count(*) FROM teams WHERE is_tracked GROUP BY league;")
+    )
+    for league, want in expected.items():
+        have = found.get(league, 0)
+        if have != want:
+            problems.append(f"{league}: {have} tracked teams, expected {want}")
     dupes = _fetch(
         conn,
         """
@@ -73,6 +80,21 @@ def check_tracked_teams(conn, expected):
     )
     if dupes:
         problems.append("duplicate tracked team(s): " + ", ".join(f"{lg} {nm}" for lg, nm in dupes))
+    return problems
+
+
+def check_featured_teams(conn, featured):
+    """The teams flagged is_featured must be exactly the featured teams in the
+    configuration (leagues.FEATURED_TEAMS). `featured` is a set of (league, espn_id).
+    The dashboard is built around these, so a changed flag should never be a surprise."""
+    in_db = {(league, espn_id) for league, espn_id in _fetch(
+        conn, "SELECT league, espn_id FROM teams WHERE is_featured;"
+    )}
+    problems = []
+    if in_db - featured:
+        problems.append("featured in the database but not in the config: " + ", ".join(f"{lg} {eid}" for lg, eid in sorted(in_db - featured)))
+    if featured - in_db:
+        problems.append("in the config but not featured in the database: " + ", ".join(f"{lg} {eid}" for lg, eid in sorted(featured - in_db)))
     return problems
 
 
@@ -202,7 +224,7 @@ def load_previous_counts(job_name, log_dir=None):
         return None  # first run, or an unreadable file: nothing to compare with
 
 
-def run_sanity_checks(conn, report, expected_tracked_teams):
+def run_sanity_checks(conn, report, expected_tracked, featured):
     """Run every check. Each runs in its own report.step, so a broken check is
     recorded as an error instead of being silently skipped; each failed check
     becomes a warning. The row counts are saved in last_<job>.json for tomorrow."""
@@ -210,7 +232,8 @@ def run_sanity_checks(conn, report, expected_tracked_teams):
     counts = {}
 
     checks = [
-        ("tracked teams", lambda: check_tracked_teams(conn, expected_tracked_teams)),
+        ("tracked teams", lambda: check_tracked_teams(conn, expected_tracked)),
+        ("featured teams", lambda: check_featured_teams(conn, featured)),
         ("games have a tracked team", lambda: check_games_have_tracked_team(conn)),
         ("final games have scores", lambda: check_final_games_have_scores(conn)),
         ("periods add up to scores", lambda: check_period_sums(conn)),

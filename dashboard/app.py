@@ -48,7 +48,7 @@ def filter_bar():
     except the Overview. On a laptop they sit in one row; on a phone
     Streamlit stacks the three columns into three short rows.
     """
-    teams = data.tracked_teams().set_index("name")
+    teams = data.featured_teams().set_index("name")
     team_names = [name for name in TEAM_ORDER if name in teams.index]
     team_col, season_col, type_col = st.columns([4, 2, 3], vertical_alignment="bottom")
 

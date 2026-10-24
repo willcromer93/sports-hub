@@ -4,13 +4,14 @@ into Postgres, then rebuilds the season/career rollups.
 
 Safe to rerun anytime: every write is an upsert. Run by cron at 4 AM (see README).
 
-Each unit of work runs inside report.step(...), so one failure (an API outage, a
-format change) is logged and alerted but doesn't stop the other steps. The script
-exits 0 if everything worked and 1 if any step failed.
+Which teams are collected comes from the league registry (leagues.py): every team in
+the leagues named in LEAGUES_ALL, plus the featured teams in the other leagues.
+Per-team work runs through report.each(...), so one team's failure is logged and
+tolerated (a few percent) while an outage is a single loud error; everything else runs
+inside report.step(...). The script exits 0 if everything worked and 1 if any step failed.
 """
 
 import logging
-import os
 import sys
 from dataclasses import dataclass
 
@@ -26,23 +27,23 @@ from db import (
     insert_game,
     insert_game_periods,
     insert_player,
-    insert_team,
     mark_players_departed,
     rebuild_stat_rollups,
+    set_team_venue,
+    upsert_league_team,
     upsert_opponent_team,
 )
 from dotenv import load_dotenv
 from espn import fetch_summary, parse_periods, parse_team_box_score
 from http_client import fetch_json
+from leagues import FEATURED_TEAMS, LEAGUES, featured_teams, leagues_all
 from log_setup import setup_logging
 from roster_tracking import decide_departures
 from run_report import RunReport
 from sanity_checks import run_sanity_checks
+from team_discovery import discover_teams
 
-# --- Load API key from .env ---
 load_dotenv()
-BALLDONTLIE_KEY = os.getenv("BALLDONTLIE_KEY")
-headers = {"Authorization": BALLDONTLIE_KEY}
 
 log = logging.getLogger("sports_hub.pipeline")
 
@@ -236,101 +237,104 @@ def pull_box_scores(conn):
     return filled
 
 
-# --- The four tracked teams ---
+# --- Teams, rosters and schedules, league by league ---
 
 
 @dataclass(frozen=True)
-class TrackedTeam:
-    label: str  # short name used in logs and alerts
-    league: str  # our league code: NBA, NCAAB, NHL, NFL
-    sport_path: str  # ESPN URL segment, e.g. "basketball/nba"
-    espn_id: str  # ESPN's team id (used to match this team in schedules)
-    espn_slug: str  # what ESPN's team/roster URLs use: usually the id, "ind" for the Colts
-    grouped_roster: bool  # NHL/NFL rosters are grouped by position; NBA/NCAAB are flat
-    founded_year: int  # no API provides this, so it's hardcoded
+class TeamRef:
+    """A team being processed tonight, once its row exists in the teams table."""
+
+    league: object  # a leagues.League
+    espn_id: str
+    name: str
+    team_id: int
 
 
-def identify_pacers():
-    """(external_id, name, venue, city) for the Pacers: identity from balldontlie,
-    plus an extra ESPN call just for venue/city enrichment."""
-    teams = fetch_json("https://api.balldontlie.io/nba/v1/teams", headers=headers)[
-        "data"
-    ]
-    pacers = [t for t in teams if t["full_name"] == "Indiana Pacers"][0]
-    team_data = fetch_json(f"{ESPN_BASE}/basketball/nba/teams/11")["team"]
-    venue, city = extract_team_venue_fields(team_data)
-    return str(pacers["id"]), pacers["full_name"], venue, city
+def fetch_team_detail(league, espn_id):
+    """(name, venue, city) from ESPN's detail page for one team."""
+    team = fetch_json(f"{ESPN_BASE}/{league.sport_path}/teams/{espn_id}")["team"]
+    venue, city = extract_team_venue_fields(team)
+    return team["displayName"], venue, city
 
 
-def identify_purdue():
-    """Purdue: identity from balldontlie. ESPN's college basketball team endpoint
-    doesn't return venue data, unlike NBA/NHL/NFL, so venue/city are hardcoded."""
-    teams = fetch_json("https://api.balldontlie.io/ncaab/v1/teams", headers=headers)[
-        "data"
-    ]
-    purdue = [t for t in teams if t["college"] == "Purdue"][0]
-    return str(purdue["id"]), purdue["full_name"], "Mackey Arena", "West Lafayette"
-
-
-def identify_red_wings():
-    """Red Wings: the external_id "DET" is fixed (never changed, or the upsert
-    would create a duplicate team); venue/city come from ESPN."""
-    team_data = fetch_json(f"{ESPN_BASE}/hockey/nhl/teams/5")["team"]
-    venue, city = extract_team_venue_fields(team_data)
-    return "DET", "Detroit Red Wings", venue, city
-
-
-def identify_colts():
-    """Colts: identity and venue/city all from ESPN."""
-    team_data = fetch_json(f"{ESPN_BASE}/football/nfl/teams/ind")["team"]
-    venue, city = extract_team_venue_fields(team_data)
-    return team_data["id"], team_data["displayName"], venue, city
-
-
-# (team, how to look up its identity), in the order they are processed
-TRACKED_TEAMS = [
-    (
-        TrackedTeam("Pacers", "NBA", "basketball/nba", "11", "11", False, 1967),
-        identify_pacers,
-    ),
-    (
-        TrackedTeam(
-            "Purdue",
-            "NCAAB",
-            "basketball/mens-college-basketball",
-            "2509",
-            "2509",
-            False,
-            1896,  # first season of Purdue men's basketball
-        ),
-        identify_purdue,
-    ),
-    (
-        TrackedTeam("Red Wings", "NHL", "hockey/nhl", "5", "5", True, 1926),
-        identify_red_wings,
-    ),
-    (
-        TrackedTeam("Colts", "NFL", "football/nfl", "11", "ind", True, 1984),
-        identify_colts,
-    ),
-]
-
-
-def pull_team(conn, team, identify):
-    """Upsert one tracked team into teams and return its team_id."""
-    external_id, name, venue, city = identify()
-    team_id = insert_team(
+def refresh_featured_team(conn, league, featured):
+    """Upsert a featured team and record its venue and city. The name and venue come
+    from ESPN's detail page; the config's venue is used only when ESPN has none
+    (it has none for college basketball). Returns a TeamRef."""
+    name, venue, city = fetch_team_detail(league, featured.espn_id)
+    team_id = upsert_league_team(
         conn,
-        team.league,
-        external_id,
+        league.code,
+        featured.espn_id,
         name,
-        espn_id=team.espn_id,
-        venue=venue,
-        city=city,
-        founded_year=team.founded_year,
+        featured=True,
+        founded_year=featured.founded_year,
     )
-    log.info("%s inserted, team_id %s | %s, %s", team.label, team_id, venue, city)
-    return team_id
+    set_team_venue(conn, team_id, venue or featured.venue, city or featured.city)
+    log.info("%s refreshed, team_id %s | %s, %s", name, team_id, venue, city)
+    return TeamRef(league, featured.espn_id, name, team_id)
+
+
+def resolve_teams(conn, report, league, everyone):
+    """Make sure every team we collect in this league has a row, and return
+    (refs, expected_count): the teams to process tonight, and how many tracked teams
+    the league should now have (None if the team list couldn't be fetched, so the
+    sanity check skips this league).
+
+    everyone=False: only the league's featured teams (usually one).
+    everyone=True: every team ESPN lists, found by discover_teams()."""
+    if not everyone:
+        featured = featured_teams(league.code)
+        results = report.each(
+            f"{league.code} teams",
+            featured,
+            lambda ft: refresh_featured_team(conn, league, ft),
+            name=lambda ft: ft.label,
+        )
+        return [ref for _ft, ref in results], len(featured)
+
+    discovered = []
+    with report.step(f"{league.code} team list"):
+        discovered = discover_teams(league)
+    if not discovered:
+        return [], None
+
+    featured_by_id = {ft.espn_id: ft for ft in featured_teams(league.code)}
+
+    def upsert(team):
+        ft = featured_by_id.get(team.espn_id)
+        team_id = upsert_league_team(
+            conn,
+            league.code,
+            team.espn_id,
+            team.name,
+            featured=ft is not None,
+            founded_year=ft.founded_year if ft else None,
+        )
+        return TeamRef(league, team.espn_id, team.name, team_id)
+
+    results = report.each(
+        f"{league.code} team rows", discovered, upsert, name=lambda t: t.name
+    )
+    refs = [ref for _team, ref in results]
+
+    # Featured teams also get their venue refreshed from ESPN's detail page
+    refs_by_id = {ref.espn_id: ref for ref in refs}
+    featured_here = [ft for ft in featured_by_id.values() if ft.espn_id in refs_by_id]
+
+    def refresh_venue(ft):
+        _name, venue, city = fetch_team_detail(league, ft.espn_id)
+        set_team_venue(
+            conn, refs_by_id[ft.espn_id].team_id, venue or ft.venue, city or ft.city
+        )
+
+    report.each(
+        f"{league.code} featured venues",
+        featured_here,
+        refresh_venue,
+        name=lambda ft: ft.label,
+    )
+    return refs, len(discovered)
 
 
 def insert_roster_player(conn, team_id, league, a):
@@ -375,50 +379,53 @@ def insert_roster_player(conn, team_id, league, a):
     )
 
 
-def pull_roster(conn, team, team_id, report):
+def roster_athletes(roster):
+    """The players in an ESPN roster reply, flattened. NBA, WNBA and college basketball
+    rosters are a flat list of players; NFL, NHL, MLB and college football rosters are a
+    list of position groups, each holding its players under "items"."""
+    athletes = roster["athletes"]
+    if athletes and "items" in athletes[0]:
+        return [player for group in athletes for player in group["items"]]
+    return athletes
+
+
+def pull_roster(conn, ref, report):
     """Pull a team's roster from ESPN, upsert every player, then mark anyone who
     was on the roster but is missing tonight as departed (see roster_tracking.py
     for the safety rule). Returns the number of players ESPN listed."""
-    previous_on_roster = count_on_roster(conn, team_id)
+    previous_on_roster = count_on_roster(conn, ref.team_id)
     cutoff = get_db_now(conn)  # players seen from here on get last_seen_at after this
-    roster = fetch_json(
-        f"{ESPN_BASE}/{team.sport_path}/teams/{team.espn_slug}/roster"
-    )
-    if team.grouped_roster:  # NHL/NFL: a list of position groups, each with "items"
-        athletes = []
-        for group in roster["athletes"]:
-            log.debug(
-                "%s group %s: %d players",
-                team.label,
-                group["position"],
-                len(group["items"]),
-            )
-            athletes.extend(group["items"])
-    else:  # NBA/NCAAB: a flat list of players
-        athletes = roster["athletes"]
+    roster = fetch_json(f"{ESPN_BASE}/{ref.league.sport_path}/teams/{ref.espn_id}/roster")
+    athletes = roster_athletes(roster)
 
     for a in athletes:
-        player_id = insert_roster_player(conn, team_id, team.league, a)
+        player_id = insert_roster_player(conn, ref.team_id, ref.league.code, a)
         log.debug("player_id %s: %s", player_id, a["fullName"])
-    log.info("%s roster: %d players", team.label, len(athletes))
+    log.info("%s roster: %d players", ref.name, len(athletes))
 
-    departing = find_departing_players(conn, team_id, cutoff)
+    departing = find_departing_players(conn, ref.team_id, cutoff)
     decision = decide_departures(previous_on_roster, len(athletes), len(departing))
     if not decision.record:
-        report.warn(f"{team.label} roster", decision.warning)
+        report.warn(f"{ref.name} roster", decision.warning)
     elif departing:
         mark_players_departed(conn, [player_id for player_id, _name, _pos in departing])
         names = ", ".join(f"{name} ({pos})" for _id, name, pos in departing)
-        log.info("%s departed (%d): %s", team.label, len(departing), names)
-        report.count(f"{team.label} departed", len(departing))
+        log.info("%s departed (%d): %s", ref.name, len(departing), names)
+        report.add_count(f"{ref.league.code} departed", len(departing))
         if decision.heads_up:
-            report.warn(f"{team.label} roster", decision.heads_up)
+            report.warn(f"{ref.name} roster", decision.heads_up)
     return len(athletes)
 
 
 def main():
     setup_logging("pipeline")
     report = RunReport("pipeline")
+
+    everyone = set()
+    with report.step("Settings"):
+        everyone = set(leagues_all())  # a typo in LEAGUES_ALL raises here
+    if report.errors:  # don't guess which leagues were meant
+        return report.finish()
 
     conn = None
     with report.step("Database connection"):
@@ -428,33 +435,45 @@ def main():
     report.conn = conn  # so a failed step can roll back the connection
 
     try:
-        # --- Teams and rosters. Order matters: it keeps database ids stable. ---
-        team_ids = {}  # label -> team_id, only for teams that were inserted OK
-        for team, identify in TRACKED_TEAMS:
-            with report.step(f"{team.label} team"):
-                team_ids[team.label] = pull_team(conn, team, identify)
-            if team.label not in team_ids:
-                continue  # no team row, so its roster and games can't be loaded
-            with report.step(f"{team.label} roster"):
-                players = pull_roster(conn, team, team_ids[team.label], report)
-                report.count(f"{team.label} players", players)
+        # --- Teams and rosters, league by league. The order is the registry's: it
+        # keeps database ids stable (see leagues.py). ---
+        teams_by_league = {}  # league code -> [TeamRef]
+        expected_tracked = {}  # league code -> tracked teams it should now have
+        for league in LEAGUES.values():
+            everyone_here = league.code in everyone
+            if not everyone_here and not featured_teams(league.code):
+                continue  # nothing is collected in this league
+            refs, expected = resolve_teams(conn, report, league, everyone_here)
+            teams_by_league[league.code] = refs
+            if expected is not None:
+                expected_tracked[league.code] = expected
+            if not refs:
+                continue  # no team rows, so no rosters or games can be loaded
+            results = report.each(
+                f"{league.code} rosters",
+                refs,
+                lambda ref: pull_roster(conn, ref, report),
+                name=lambda ref: ref.name,
+            )
+            report.count(f"{league.code} players", sum(n for _ref, n in results))
 
-        # --- Games (ESPN schedules) ---
-        # Needs each tracked team's team_id, so it runs after the teams are inserted.
-        for team, _identify in TRACKED_TEAMS:
-            if team.label not in team_ids:
+        # --- Games (ESPN schedules). Needs every team's team_id, so it runs after
+        # all the team rows exist. ---
+        for code, refs in teams_by_league.items():
+            if not refs:
                 continue
-            with report.step(f"{team.label} games"):
-                games = pull_games(
-                    conn,
-                    team.league,
-                    team.sport_path,
-                    team.espn_id,
-                    team_ids[team.label],
-                )
-                report.count(f"{team.label} games", games)
-                if games == 0:
-                    report.warn(f"{team.label} games", "ESPN returned 0 games")
+            results = report.each(
+                f"{code} games",
+                refs,
+                lambda ref: pull_games(
+                    conn, ref.league.code, ref.league.sport_path, ref.espn_id, ref.team_id
+                ),
+                name=lambda ref: ref.name,
+            )
+            games = sum(n for _ref, n in results)
+            report.count(f"{code} games", games)
+            if results and games == 0:
+                report.warn(f"{code} games", "ESPN returned 0 games for every team")
 
         # --- Game periods and box scores (ESPN per-game summaries) ---
         # After the games pull, so games that just went final get filled in.
@@ -470,7 +489,12 @@ def main():
             report.count("career rollup rows", career_rows)
 
         # --- Sanity checks on the finished data (warnings only; see sanity_checks.py) ---
-        run_sanity_checks(conn, report, expected_tracked_teams=len(TRACKED_TEAMS))
+        run_sanity_checks(
+            conn,
+            report,
+            expected_tracked=expected_tracked,
+            featured={(ft.league, ft.espn_id) for ft in FEATURED_TEAMS},
+        )
     finally:
         conn.close()
 
