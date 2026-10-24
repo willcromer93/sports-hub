@@ -7,7 +7,7 @@ Shared by api_pulls.py (nightly: fills in new games) and refresh_stats.py
 don't touch the database.
 """
 
-import requests
+from http_client import fetch_json
 
 # League -> ESPN URL path segment
 SPORT_PATHS = {
@@ -20,12 +20,10 @@ SPORT_PATHS = {
 
 def fetch_summary(league, event_id):
     """Fetch ESPN's full summary (line scores, box score, ...) for one game."""
-    response = requests.get(
+    return fetch_json(
         f"https://site.api.espn.com/apis/site/v2/sports/{SPORT_PATHS[league]}/summary",
         params={"event": event_id},
-        timeout=30,  # never hang forever if ESPN stops responding
     )
-    return response.json()
 
 
 def extract_linescores(competitor):

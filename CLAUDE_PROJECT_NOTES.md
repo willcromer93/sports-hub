@@ -567,3 +567,40 @@ Audited this repo plus the two static sites (`willcromer93.github.io`, `links`).
 - Review the firewall (`sudo ufw status verbose`) and decide whether to bind Streamlit to 127.0.0.1.
 - Phase B: timeouts, retries, `logging`, a one-line run summary, and an ntfy alert on failure (the backup and restore-test cron jobs fail silently into their logs until then).
 - Automate the Mac-side backup pull (launchd) once you are happy with the manual `rsync`.
+
+### 2026-10-23 — Phase B: error handling, logging, alerts, monitoring
+
+**Where things stood:** homelab had run unattended for days (nightly pipeline 0 errors, 4 nightly backups, site up). It had restarted once on its own on 2026-10-22 ~11:20 AM with no clean shutdown in the log, i.e. a power loss or hard reset (no update, no `reboot-required`). Postgres recovered by itself and the restore test passed afterwards. Consider a small UPS. The firewall (`ufw`) is confirmed active (it logs `UFW BLOCK` lines).
+
+**Design agreed with Will:** failures-only phone alerts via public ntfy.sh, plus a healthchecks.io check for runs that never happen. Built in stages, each verified before the next.
+
+**What was built (all in `scripts/`, tests in `tests/`):**
+- `http_client.py`: `fetch_json()` replaces every raw `requests.get`: 5 s connect / 30 s read timeouts, 3 retries with 1-2-4 s backoff (timeouts, dropped connections, 429, 5xx; honors `Retry-After`; no retry on 404), 0.2 s pause between calls, one clear `FetchError`.
+- `log_setup.py`: Python `logging`, timestamped, rotating (5 x 5 MB) into `logs/<job>.log`; shows on screen only when run by hand. Handlers sit on the parent logger `sports_hub` so child loggers (`sports_hub.notify`, ...) share them.
+- `run_report.py`: `RunReport` + `report.step("label")`: logs the traceback, records the error, rolls back the DB connection, and carries on. `finish()` logs one SUMMARY line, writes `logs/last_<job>.json`, sends the ntfy alert (errors and warnings only), pings healthchecks, and returns the exit code (1 if any step failed).
+- `notify.py` / `notify.sh`: ntfy alert + healthchecks ping. They never fail the caller, and never log the topic or ping URL (exceptions from `requests` contain the URL, so only the exception type is logged). Each job has its own optional check: `HEALTHCHECK_URL` (pipeline), `HEALTHCHECK_REFRESH_URL`, `HEALTHCHECK_BACKUP_URL`, `HEALTHCHECK_RESTORE_URL`.
+- `api_pulls.py` restructured from a 546-line top-to-bottom script into functions: four `identify_*` functions (the only team-specific parts), one table `TRACKED_TEAMS`, shared `pull_team` / `pull_roster` / `insert_roster_player`, and a `main()` of isolated steps (16 per run). Same order of operations as before so database ids stay stable. A team whose identity step fails has its roster and games skipped instead of raising a NameError.
+- `refresh_stats.py`: same treatment; every game is checked in its own step.
+- Backup and restore-test scripts: `set -Eeuo pipefail` plus an `ERR` trap that sends an alert and a fail ping; optional start/success pings.
+- `.env.example` documents all new settings. **Dead code removed:** the NHL schedule call (`red_wings_data`, 2 lines) was fetched and never used, so an NHL outage could have crashed the whole run for nothing. (`api_pulls.py` shrank from 546 to 459 lines overall, mostly from de-duplicating the four copy-pasted team blocks.)
+
+**How it was verified (on homelab's scratch database, never the live one, with alerts disabled):**
+- Old vs new `api_pulls.py`: 4 runs (2 each) were **identical in every table** (row counts and content hashes ignoring `updated_at`/`last_updated`/rollup ids), same exit code, empty stderr, live DB untouched.
+- Old vs new `refresh_stats.py` with a deliberately corrupted stat (+5): both repaired it to the backup's value, applied the same 8 genuine ESPN corrections, and ended in identical states.
+- 14 unit tests (`python -m unittest discover -s tests`, about 3 s): retries, 404 not retried, bad JSON, timeouts, failed-step isolation + rollback, alert on failure only, per-job healthcheck variables, and "secrets never appear in logs". `notify.sh` was tested against a local fake ntfy server.
+- Live end-to-end test from homelab: a real ntfy message reached the phone and the Mac; healthchecks.io's own alert reached the same topic; a success ping turned the check green.
+
+**Finding (not a bug in the new code):** the season/career rollup tables' auto-numbered ids (`season_stat_id`, `career_stat_id`) sometimes come out in a different order between runs, because `rebuild_stat_rollups` does `INSERT ... GROUP BY` with no `ORDER BY` and Postgres may change aggregation method as table statistics refresh. The data itself is identical (checked by ignoring the id columns); old code did the same. Optional fix: add `ORDER BY` to the rollup SELECTs so ids are reproducible.
+
+**Gotchas hit:**
+- My first A/B test showed two tables "different". Theories (float order, arbitrary ids) were each tested instead of assumed; the real cause was the id numbering above. A loop that rebuilds without resetting the id sequence can't test id order (ids always count up); reset the sequence first.
+- `.env` is sourced after command-line overrides, so `BACKUP_DIR=... ./script.sh` does not override it; test with a modified copy.
+- A topic or ping URL pasted into a screenshot leaks it. The ntfy topic appeared in one screenshot during setup, so **rotate it once setup is final** (new value in `.env`, update the healthchecks.io ntfy integration, re-subscribe the devices).
+- ntfy desktop vs phone are separate subscriptions: the Mac app worked first; the phone needed adding by hand.
+- Python 3.12 (Mac venv) vs 3.14 (server): everything written works on both.
+
+**Next up:**
+- Deploy: push, `git pull` on the server (first remove its temporary scp'd copies), update the crontab to the new `flock` lines, move the old `logs/pipeline.log` aside, and un-pause the healthchecks check.
+- Failure drill on the server (alerts on purpose), then watch the first real 4 AM run (`logs/last_pipeline.json`, the check going green).
+- Optional second and third healthchecks checks for backups and the weekly refresh; rotate the ntfy topic.
+- Then Phase C (roster-departure detection and post-run sanity checks) and Phase D (all 7 leagues, driven by the `TRACKED_TEAMS`-style table).

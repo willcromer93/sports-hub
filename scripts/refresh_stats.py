@@ -12,7 +12,13 @@ Game scores/status don't need this — the nightly schedule pull already
 refreshes every game row each night.
 
 Meant to run weekly via cron, e.g. Sundays at 5 AM (after the 4 AM nightly run).
+Like the nightly pipeline, each game is checked inside report.step(...), so one
+failed ESPN fetch is logged and alerted but doesn't stop the other games. Exits
+0 if everything worked and 1 if any step failed.
 """
+
+import logging
+import sys
 
 from db import (
     box_score_rows,
@@ -25,13 +31,17 @@ from db import (
     rebuild_stat_rollups,
 )
 from espn import fetch_summary, parse_periods, parse_team_box_score
+from log_setup import setup_logging
+from run_report import RunReport
+
+log = logging.getLogger("sports_hub.refresh")
 
 # How far back to re-check. With a weekly run, 14 days means every game
 # gets checked twice before it ages out — ESPN corrections usually land
 # within a few days of the game.
 LOOKBACK_DAYS = 14
 
-# Print at most this many individual differences per game, to keep the log readable
+# Log at most this many individual differences per game, to keep the log readable
 MAX_CHANGES_SHOWN = 10
 
 
@@ -62,14 +72,10 @@ def describe_box_score_changes(stored, fresh):
     return changes
 
 
-conn = get_connection()
-games = get_recent_final_games(conn, LOOKBACK_DAYS)
-print(f"Checking {len(games)} final games from the last {LOOKBACK_DAYS} days")
-
-periods_updated = 0
-box_scores_updated = 0
-unchanged = 0
-for game_id, league, external_id, regulation_periods, sides in games:
+def check_game(conn, game, totals):
+    """Re-check one game against ESPN and rewrite whatever changed.
+    `totals` is a dict of running counters shared across games."""
+    game_id, league, external_id, regulation_periods, sides = game
     summary = fetch_summary(league, external_id)
     game_changed = False
 
@@ -80,11 +86,11 @@ for game_id, league, external_id, regulation_periods, sides in games:
     stored_periods = get_game_periods(conn, game_id)
     if fresh_periods and set(fresh_periods) != set(stored_periods):
         insert_game_periods(conn, game_id, fresh_periods, replace=True)
-        periods_updated += 1
+        totals["periods_updated"] += 1
         game_changed = True
-        print(f"{league} game {external_id}: period scores updated")
-        print(f"    was: {sorted(stored_periods)}")
-        print(f"    now: {sorted(fresh_periods)}")
+        log.info("%s game %s: period scores updated", league, external_id)
+        log.info("    was: %s", sorted(stored_periods))
+        log.info("    now: %s", sorted(fresh_periods))
 
     # --- Box scores: each team's side is compared and rewritten on its own ---
     for team_id, espn_id in sides:
@@ -101,27 +107,63 @@ for game_id, league, external_id, regulation_periods, sides in games:
                 box_score_rows(conn, team_id, league, fresh_box),
                 replace=True,
             )
-            box_scores_updated += 1
+            totals["box_scores_updated"] += 1
             game_changed = True
-            print(
-                f"{league} game {external_id}, team {team_id}: "
-                f"box score updated ({len(changes)} changes)"
+            log.info(
+                "%s game %s, team %s: box score updated (%d changes)",
+                league,
+                external_id,
+                team_id,
+                len(changes),
             )
             for change in changes[:MAX_CHANGES_SHOWN]:
-                print(f"    {change}")
+                log.info("    %s", change)
             if len(changes) > MAX_CHANGES_SHOWN:
-                print(f"    ... and {len(changes) - MAX_CHANGES_SHOWN} more")
+                log.info("    ... and %d more", len(changes) - MAX_CHANGES_SHOWN)
 
     if not game_changed:
-        unchanged += 1
+        totals["unchanged"] += 1
 
-# Season/career totals are built from box scores, so rebuild them if any changed
-if box_scores_updated:
-    season_rows, career_rows = rebuild_stat_rollups(conn)
-    print(f"Rollups rebuilt: {season_rows} season rows, {career_rows} career rows")
 
-print(
-    f"Done: {periods_updated} games had period score changes, "
-    f"{box_scores_updated} box score sides changed, {unchanged} games unchanged"
-)
-conn.close()
+def main():
+    setup_logging("refresh")
+    report = RunReport("refresh")
+
+    conn = None
+    with report.step("Database connection"):
+        conn = get_connection()
+    if conn is None:
+        return report.finish()
+    report.conn = conn
+
+    try:
+        games = []
+        with report.step("List recent games"):
+            games = get_recent_final_games(conn, LOOKBACK_DAYS)
+        log.info("Checking %d final games from the last %d days", len(games), LOOKBACK_DAYS)
+
+        totals = {"periods_updated": 0, "box_scores_updated": 0, "unchanged": 0}
+        for game in games:
+            _game_id, league, external_id, _periods, _sides = game
+            with report.step(f"{league} game {external_id}"):
+                check_game(conn, game, totals)
+
+        # Season/career totals are built from box scores, so rebuild them if any changed
+        if totals["box_scores_updated"]:
+            with report.step("Rollups"):
+                season_rows, career_rows = rebuild_stat_rollups(conn)
+                report.count("season rollup rows", season_rows)
+                report.count("career rollup rows", career_rows)
+
+        report.count("games checked", len(games))
+        report.count("period changes", totals["periods_updated"])
+        report.count("box score changes", totals["box_scores_updated"])
+        report.count("unchanged", totals["unchanged"])
+    finally:
+        conn.close()
+
+    return report.finish()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

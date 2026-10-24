@@ -34,6 +34,11 @@ SPORTS-HUB/
 │ ├── refresh_stats.py # Weekly: re-checks recent games for ESPN stat corrections, rewrites only what changed
 │ ├── espn.py # Shared ESPN game-summary helpers (fetch, parse line scores + box scores); no DB access
 │ ├── db.py # Database connections (read-write + read-only for the dashboard) + insert/read functions
+│ ├── http_client.py # fetch_json(): every API call goes through it (timeouts, retries, clear errors)
+│ ├── log_setup.py # Logging setup: timestamped, rotating files in logs/
+│ ├── run_report.py # RunReport: isolates failed steps, writes the summary + last_<job>.json, alerts
+│ ├── notify.py # Phone alerts (ntfy) and "did it run?" pings (healthchecks.io), for Python
+│ ├── notify.sh # The same two helpers for the bash scripts
 │ ├── backup_db.sh # Nightly pg_dump into BACKUP_DIR, verified, old ones pruned (see Backups)
 │ └── restore_test.sh # Weekly: restore the newest dump into a scratch DB and compare row counts
 ├── sql/
@@ -44,6 +49,7 @@ SPORTS-HUB/
 │ ├── stat_rollups_season_type.sql # Adds season_type to season/career rollups; season -> season_year
 │ ├── appearances_team_id.sql # Adds team_id to player_game_appearances so opponents' box scores can be stored
 │ └── dashboard_ro_role.sql # Creates the SELECT-only dashboard_ro Postgres role used by the public dashboard
+├── tests/ # Unit tests (run: venv/bin/python -m unittest discover -s tests)
 ├── requirements.txt # Exact package versions (pip freeze of the production venv)
 ├── venv/ # Python virtual environment (not tracked in git)
 ├── .env # API keys + DB credentials + backup settings (not tracked in git)
@@ -123,13 +129,13 @@ Holds the database connection and insert logic, using `psycopg2` directly (not a
 
 ### `scripts/api_pulls.py`
 
-Pulls team and player data for all four teams and loads it into Postgres. **Safe to rerun anytime** — every insert is an upsert, so re-running won't create duplicate rows, only refresh existing ones.
+Pulls team and player data for all four teams and loads it into Postgres. **Safe to rerun anytime** — every insert is an upsert, so re-running won't create duplicate rows, only refresh existing ones. Each stage below runs as an isolated step (see "Monitoring and alerts"): if one fails, the rest still run, an alert is sent, and the script exits 1.
 
 | Team | League | Team Identity Source | Player Roster Source |
 |------|--------|-------------------|------------------------|
 | Indiana Pacers | NBA | balldontlie.io | ESPN roster API |
 | Purdue | NCAAB | balldontlie.io | ESPN roster API |
-| Detroit Red Wings | NHL | NHL Web API (`api-web.nhle.com`) | ESPN roster API |
+| Detroit Red Wings | NHL | Hardcoded (`DET`; venue/city from ESPN) | ESPN roster API |
 | Indianapolis Colts | NFL | ESPN Site API | ESPN roster API |
 
 **What it does:**
@@ -207,9 +213,10 @@ The server's Tailscale name is `sportshub`.
 **Scheduled jobs** (`crontab -l`; the file must end with a newline or the last line is
 silently skipped):
 ```
-0 4 * * * cd /home/<server-user>/sports-hub && venv/bin/python scripts/api_pulls.py >> /home/<server-user>/sports-hub/logs/pipeline.log 2>&1
-0 5 * * 0 cd /home/<server-user>/sports-hub && venv/bin/python scripts/refresh_stats.py >> /home/<server-user>/sports-hub/logs/refresh.log 2>&1
+0 4 * * * cd /home/<server-user>/sports-hub && flock -n /tmp/sports_hub.lock venv/bin/python scripts/api_pulls.py >> logs/pipeline.cron.log 2>&1
+0 5 * * 0 cd /home/<server-user>/sports-hub && flock -w 3600 /tmp/sports_hub.lock venv/bin/python scripts/refresh_stats.py >> logs/refresh.cron.log 2>&1
 ```
+`flock` is a lock: the pipeline skips (`-n`) if another run still holds it, and the weekly refresh waits (`-w`, up to an hour) instead, so the two never overlap. The scripts write their real logs themselves (`logs/pipeline.log`, `logs/refresh.log`, rotating); the `*.cron.log` files catch only crashes that happen before logging starts.
 
 **Dashboard service**: `/etc/systemd/system/sports-hub-dashboard.service` runs
 `venv/bin/streamlit run dashboard/app.py --server.address 0.0.0.0 --server.port 8501`
@@ -294,6 +301,30 @@ The server keeps compressed database dumps, and a weekly test proves they can ac
 - **Restoring for real:** create an empty database, then `pg_restore -d <db> --no-owner --no-acl <dump>`, and re-apply the `dashboard_ro` grants (see "Migrating to a new server"). Run the restore test first to confirm the dump is good.
 - **What is kept out of git:** `.gitignore` covers `.env` and every `.env.*` (except `.env.example`, which lists variable names with placeholder values), `backups/`, `*.dump`, `*.dump.partial`, `*.sql.gz`, `*.tar.gz`, `logs/`, `*.log`, keys, and `.streamlit/secrets.toml`. Backup settings live in the server's `.env`. Check with `git check-ignore -v <path>`.
 
+## Monitoring and alerts
+
+Three layers, so a problem reaches your phone whether a job *fails* or *never runs*:
+
+| Layer | Catches | How |
+|---|---|---|
+| **Step isolation** (`RunReport`) | One API outage or format change | Each unit of work (a team, its roster, its games, box scores, rollups) runs in its own `report.step(...)`. A failure is logged with its traceback and the rest still runs. The job exits 1 if any step failed. |
+| **Phone alert** (ntfy) | A failed step, or a suspicious empty result (a roster or schedule returning 0 items) | `notify.py` / `notify.sh` POST a short message to your private ntfy topic. It says *what* failed, never data. Failures only; a clean run is silent. |
+| **"Did it run?" check** (healthchecks.io) | Cron not firing, the server down, the job hanging | After a good run the job pings its check. A missing ping alerts you (email and ntfy). The check's schedule is `0 4 * * *` America/Indiana/Indianapolis with a 2-hour grace time. |
+
+**Settings** live in `.env` (see `.env.example`; none of them are ever committed): `NTFY_TOPIC` (long and random: anyone who knows it can read or send to it), `HEALTHCHECK_URL` for the nightly pipeline, and optionally `HEALTHCHECK_REFRESH_URL`, `HEALTHCHECK_BACKUP_URL`, `HEALTHCHECK_RESTORE_URL`, each pointing at its own healthchecks.io check. A job with no URL set simply doesn't ping. Subscribe your phone and Mac to the topic with the ntfy app. If the topic ever leaks (e.g. in a screenshot), generate a new one in `.env`, update the healthchecks.io ntfy integration, and re-subscribe.
+
+**Where to look when something fails**
+- `logs/pipeline.log` and `logs/refresh.log`: timestamped lines with levels (INFO/WARNING/ERROR) and full tracebacks. Rotating: 5 files of up to 5 MB each. Per-player lines are DEBUG-level and not logged.
+- `logs/last_pipeline.json` and `logs/last_refresh.json`: the machine-readable result of the latest run (status, duration, per-step counts, errors). The dashboard or a script can read these.
+- `logs/*.cron.log`: only crashes that happen before logging starts (e.g. an import error).
+- `journalctl -u sports-hub-dashboard`: the dashboard.
+
+**API calls** all go through `http_client.fetch_json()`: 5 s connect and 30 s read timeouts, up to 3 retries (waits of 1, 2, 4 s, honoring `Retry-After`) for timeouts, dropped connections, HTTP 429 and 5xx, a 0.2 s pause between calls, and a clear `FetchError` naming the URL if it still fails. A 404 isn't retried.
+
+**Tests:** `venv/bin/python -m unittest discover -s tests -v` (14 tests, about 3 seconds). They run a throwaway local web server that returns 500s, 404s, garbage JSON and slow replies, and check the retry, timeout and alert logic without touching any real API.
+
+**Failure drill** (run after changing this machinery): on a throwaway copy, break something on purpose (an unreachable API URL, a wrong database name, a bad `.env` password) and confirm that the run exits 1, the other steps still run, a message reaches your phone, and the healthchecks.io check goes red. Never test against the live `.env` values without telling yourself first, since the alerts are real.
+
 ## Security
 
 The dashboard is public (Tailscale Funnel, no login), so it is set up to do as little damage as possible if something goes wrong.
@@ -312,7 +343,7 @@ The dashboard is public (Tailscale Funnel, no login), so it is set up to do as l
 ## API Notes
 
 - **balldontlie.io** — requires an `Authorization` header with your API key. Used for NBA/NCAAB team identity only (kept stable/unchanged from original inserts — see note below). Its `/players` endpoint returns historically-associated players rather than current roster, and its `/players/active` endpoint (which would fix that) requires a paid tier — so player rosters are pulled from ESPN instead.
-- **NHL API** (`api-web.nhle.com`) — public, no auth required. Used for Red Wings team identity/schedule only; rosters come from ESPN.
+- **NHL API** (`api-web.nhle.com`) — public, no auth required. No longer called: the pipeline used to fetch the Red Wings schedule from it but never used the result, and removing the call means an NHL API outage can't break the nightly run.
 - **ESPN API** (`site.api.espn.com`) — public, no auth required, unofficial (may change without notice). Primary source for player rosters across all sports, and for venue/city team enrichment (pro leagues only). Response shape varies noticeably by sport:
   - NBA/NCAAB rosters are a flat player list; NFL/NHL rosters are grouped by position category, requiring a nested loop.
   - Venue data lives at `team.franchise.venue` for NBA/NHL/NFL; the college basketball team endpoint doesn't return venue data at all.
@@ -334,8 +365,9 @@ The dashboard is public (Tailscale Funnel, no login), so it is set up to do as l
 - [x] Populate `game_periods` (per-period scores, including OT and shootouts)
 - [x] Populate `player_game_appearances` and `player_game_stats` (both teams' box scores)
 - [x] Populate `player_season_stats` / `player_career_stats` rollups
-- [ ] Add error handling for failed requests (non-200 responses, timeouts)
-- [ ] Add logging instead of print statements
+- [x] Add error handling for failed requests (timeouts, retries, non-200 responses, isolated steps, alerts)
+- [x] Add logging instead of print statements (rotating timestamped logs)
+- [x] Nightly verified backups, a weekly restore test, and "did it run?" monitoring
 - [ ] Add a mechanism to detect players who've left a team's roster (current upsert-only pattern can't remove/flag departed players)
 - [x] Weekly re-check of recent games for ESPN stat corrections (`refresh_stats.py`)
 - [x] Build the Streamlit dashboard (first version)

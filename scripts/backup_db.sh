@@ -2,12 +2,17 @@
 # Nightly database backup: writes a compressed pg_dump into BACKUP_DIR and prunes old ones.
 # Settings (all optional) come from .env: BACKUP_DIR, BACKUP_KEEP_DAYS. See .env.example.
 # Stops at the first error (set -e), so a failure never leaves a "good-looking" bad backup.
-set -euo pipefail
+set -Eeuo pipefail   # -E makes the ERR trap below also fire inside functions
 umask 077   # every file/folder created below is readable by this user only
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 set -a; . "$PROJECT_DIR/.env"; set +a
 export PGPASSWORD="$DB_PASSWORD"
+. "$PROJECT_DIR/scripts/notify.sh"
+
+# If any command below fails: alert your phone and tell healthchecks.io, then stop.
+trap 'ntfy_alert "Sports Hub backup FAILED" "backup_db.sh failed at line $LINENO. See logs/backup.log"; hc_ping "${HEALTHCHECK_BACKUP_URL:-}" fail' ERR
+hc_ping "${HEALTHCHECK_BACKUP_URL:-}" start
 
 BACKUP_DIR="${BACKUP_DIR:-$HOME/backups}"
 KEEP_DAYS="${BACKUP_KEEP_DAYS:-30}"
@@ -32,3 +37,4 @@ mv "$PARTIAL" "$FINAL"
 find "$BACKUP_DIR" -maxdepth 1 -name 'sports_hub_*.dump' -mtime +"$KEEP_DAYS" -delete
 
 echo "$(date -Is) backup ok: $FINAL ($(du -h "$FINAL" | cut -f1))"
+hc_ping "${HEALTHCHECK_BACKUP_URL:-}"
