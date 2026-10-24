@@ -604,3 +604,23 @@ Audited this repo plus the two static sites (`willcromer93.github.io`, `links`).
 - Failure drill on the server (alerts on purpose), then watch the first real 4 AM run (`logs/last_pipeline.json`, the check going green).
 - Optional second and third healthchecks checks for backups and the weekly refresh; rotate the ntfy topic.
 - Then Phase C (roster-departure detection and post-run sanity checks) and Phase D (all 7 leagues, driven by the `TRACKED_TEAMS`-style table).
+
+### 2026-10-23 (continued) — Phase B deployed and drilled
+
+- **Deployed:** pushed `ba578ed..94b6400`; on the server removed the temporary scp'd copies, `git pull --ff-only`, `chmod +x` on the shell scripts; every deployed script's SHA-256 matched the Mac's. Old logs kept as `logs/pipeline.log.legacy-2026-10-23` and `refresh.log.legacy-2026-10-23` (the log format changed). The previous crontab is saved as `~/crontab_before_phaseB_2026-10-23.txt` on the server.
+- **First real runs** (live database): exit 0 in about 8 s, 16 steps OK, 0 errors; data advanced normally (players 853 to 867, final games 28 to 29). The 14 unit tests also pass on the server's Python 3.14.
+- **Failure drill (alerts on, scratch database, isolated log folder)** reached the phone and Mac as designed:
+  - Bad balldontlie key: Pacers and Purdue failed with a clear `401 Unauthorized`; the other 10 steps still completed; exit 1; one alert naming both failures; healthchecks went DOWN (received a failure signal).
+  - Nonexistent database: stopped at the connection step; exit 1; alert sent.
+  - A normal run recovered the check ("UP, downtime lasted 26 seconds"). The live DB and the real `last_pipeline.json` were untouched by the drills.
+- **Missed-run detection already proven by accident:** the first real run reported "pipeline is UP, the downtime lasted 3 days, 17 hours", i.e. healthchecks had been alerting since the old-style runs stopped pinging.
+- **Cron now** (`crontab -l`): `0 4 * * *` pipeline and `0 5 * * 0` refresh, both through `flock` on `/tmp/sports_hub.lock` (`-n` skips if a run is in progress, `-w 3600` makes the refresh wait), output to `logs/*.cron.log`; backup `30 3 * * *` and restore test `0 6 * * 0` unchanged. Tested: with the lock held the line exits 1 and writes nothing; under a minimal cron-style environment (`env -i`) it runs and exits 0; trailing newline confirmed.
+- **Gotchas:** `set -e` in my own test script ended it on the *expected* non-zero exit code of the locked run (test harness, not the cron line). Also: `git pull` needs the temporary scp'd copies removed first.
+
+**Still open:**
+- **Rotate the ntfy topic** (it was visible in a screenshot): new `NTFY_TOPIC` in the server `.env`, update the ntfy integration in healthchecks.io, re-subscribe phone and Mac.
+- Optional extra healthchecks.io checks for the backup (`HEALTHCHECK_BACKUP_URL`, schedule `30 3 * * *`), the restore test (`HEALTHCHECK_RESTORE_URL`, weekly) and the refresh (`HEALTHCHECK_REFRESH_URL`, weekly); free tier allows 20.
+- Check tomorrow morning: `logs/last_pipeline.json` should show a 4:00 AM start, and the check should be green.
+- A UPS for the server (unclean power loss on 2026-10-22).
+- Optional: `ORDER BY` in the rollup rebuild so ids are reproducible.
+- Next phases: C (roster-departure detection, post-run sanity checks), then D (all 7 leagues).
