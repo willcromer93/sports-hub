@@ -666,3 +666,23 @@ Audited this repo plus the two static sites (`willcromer93.github.io`, `links`).
 **To check tomorrow morning:** `logs/last_pipeline.json` should show a 04:00 start, status ok, and `sanity problems` 0; the healthchecks.io check should be green; the new row-count check will compare against tonight's saved counts for the first time.
 
 **Still open:** rotate the ntfy topic; optional extra healthchecks.io checks (backup, refresh, restore test); UPS; optional `ORDER BY` in the rollup rebuild; **Phase D: all 7 leagues, every team**. For Phase D: every team becomes tracked, so the "every game involves a tracked team" check turns into "two"; `TRACKED_TEAMS` becomes ~360 rows; balldontlie's free tier is rate limited (the retry client honors `Retry-After`); and the roster-departure guard is per team, so it scales.
+
+### 2026-10-23 (continued) — Phase D design: all 7 leagues, every team
+
+**Probed ESPN read-only (about 35 requests through the retrying client) before designing.** Findings:
+- Teams: NFL 32, NHL 32, NBA 30, WNBA 15, MLB 30, CBB men's D1 362, CFB 762 in ESPN's list but **138 FBS** (via `apis/v2/sports/football/college-football/standings?group=80&level=3`; the `groups=` filter on the teams endpoint is ignored). About 640 teams, about 25,000 players.
+- **The teams endpoint returns only 50 teams without `limit`, with no count or paging field**, so truncation is silent. Defense: always pass `limit=1000` and require a per-league minimum team count.
+- **Scoreboard date ranges return HTTP 400** (single days work, even future ones), and **college scoreboards hide about half of the games by default** (CBB 2026-02-10: 11 vs 22), so per-team schedules (complete by construction) stay the nightly schedule source.
+- Rosters: flat for NBA/WNBA/CBB, grouped for NFL/NHL/MLB/CFB (auto-detect with `"items" in first element`). Box scores: **WNBA is identical to NBA; CFB is identical to NFL's category format; MLB is new** (two unnamed groups, batting and pitching, told apart by their column labels; paired values `H-AB`, `PC-ST`).
+- No database constraint restricts league names; only `sport_period_labels` needs rows (WNBA Quarter 4, CFB Quarter 4, MLB Inning 9). Footprint today: 615 stat rows per final game, about 145 bytes each; estimate about 12,000 games and 6 million stat rows per season, about 1 GB per season.
+- Coupling found: `is_tracked` means "one of our four teams" in the dashboard (Overview would try to draw every tracked team; the team selector is protected by `TEAM_ORDER`). Plan: new `teams.is_featured` for the four; `is_tracked` = "we collect full data".
+
+**Decisions (asked): CBB men's D1 + CFB FBS only; current season only; easiest-first order; ESPN for everything.**
+
+**Plan and estimates (at Will's pace):** D1 registry + automatic team discovery + `is_featured` + per-league error tolerance, no new leagues, proven identical to today's output (6-8 h); D2 NBA/NFL/NHL all teams (4-6 h); D3 WNBA (2 h); D4 CBB (6-8 h); D5 CFB (5-7 h); D6 MLB parser (8-12 h). Total about 35-45 h over several sessions.
+
+**Cost model:** about 60 API calls a night today; about 1,000-1,300 at full scale if only in-season schedule types are fetched and college rosters are refreshed weekly (about 8-12 min); first backfill about 3,500 box-score calls. Per-team failures are aggregated per league (more than 5% failing fails the league's step).
+
+**Safe-testing plan:** dedicated `sports_hub_staging` database (one sudo command; the scratch DB is wiped weekly by the restore test); leagues enabled one at a time through `LEAGUES=` in `.env`; per-league gates (team count equals ESPN's, rosters non-empty, every final game has a box score, periods add up to scores for 99%+ with acknowledged exceptions, stat names reviewed for additivity, rollups match an independent re-aggregation, request count and runtime within budget, sanity checks clean, featured pages unchanged); trimmed saved ESPN samples for offline parser tests (the repo is public).
+
+**Risk accepted knowingly:** ESPN's API is unofficial and undocumented; going from about 60 to about 1,300 calls a night could be rate-limited or blocked. Mitigations: pacing, season-aware calls, weekly college rosters, alerts on 403/429, and switching a league to an official API (MLB/NHL) if needed.
