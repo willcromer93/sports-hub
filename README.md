@@ -37,6 +37,8 @@ SPORTS-HUB/
 │ ├── http_client.py # fetch_json(): every API call goes through it (timeouts, retries, clear errors)
 │ ├── log_setup.py # Logging setup: timestamped, rotating files in logs/
 │ ├── run_report.py # RunReport: isolates failed steps, writes the summary + last_<job>.json, alerts
+│ ├── roster_tracking.py # The rule for marking departed players (and its safety guard); no database code
+│ ├── sanity_checks.py # Post-run checks on the finished data (duplicates, scores, box scores, row counts, freshness)
 │ ├── notify.py # Phone alerts (ntfy) and "did it run?" pings (healthchecks.io), for Python
 │ ├── notify.sh # The same two helpers for the bash scripts
 │ ├── backup_db.sh # Nightly pg_dump into BACKUP_DIR, verified, old ones pruned (see Backups)
@@ -48,6 +50,7 @@ SPORTS-HUB/
 │ ├── games_season_type.sql # Adds season_type (preseason/regular/postseason) to games
 │ ├── stat_rollups_season_type.sql # Adds season_type to season/career rollups; season -> season_year
 │ ├── appearances_team_id.sql # Adds team_id to player_game_appearances so opponents' box scores can be stored
+│ ├── players_roster_tracking.sql # Adds last_seen_at / departed_at to players (roster departure tracking)
 │ └── dashboard_ro_role.sql # Creates the SELECT-only dashboard_ro Postgres role used by the public dashboard
 ├── tests/ # Unit tests (run: venv/bin/python -m unittest discover -s tests)
 ├── requirements.txt # Exact package versions (pip freeze of the production venv)
@@ -113,6 +116,7 @@ psql -h localhost -d sports_hub -f sql/teams_is_tracked.sql
 psql -h localhost -d sports_hub -f sql/games_season_type.sql
 psql -h localhost -d sports_hub -f sql/stat_rollups_season_type.sql
 psql -h localhost -d sports_hub -f sql/appearances_team_id.sql
+psql -h localhost -d sports_hub -f sql/players_roster_tracking.sql   # run right after a nightly pull (it refuses to run on stale data)
 ```
 
 ## Scripts
@@ -319,9 +323,13 @@ Three layers, so a problem reaches your phone whether a job *fails* or *never ru
 - `logs/*.cron.log`: only crashes that happen before logging starts (e.g. an import error).
 - `journalctl -u sports-hub-dashboard`: the dashboard.
 
+**Roster departures.** Each nightly roster pull marks players who were on a team's roster but are missing tonight as departed (`players.departed_at`), instead of leaving them looking current forever. Rows are never deleted. A safety rule (`roster_tracking.py`) refuses to record anything when ESPN returns an empty roster or one under 50% of the previous size, and raises a warning, so a bad response can't wipe a roster. A real mass cutdown (about 90 to 53 players) goes through, with an informational alert if more than 25% leave at once. A player who reappears is automatically marked back on the roster. The dashboard treats a player as "on the roster" only if `departed_at IS NULL`.
+
+**Sanity checks** run at the end of every nightly run (`sanity_checks.py`) and look at the finished data, not at the steps: exactly the expected number of tracked teams with no duplicates; every game involves a tracked team; every final game has both scores; per-period scores add up to the final score; final games older than 36 h have a box score; the schedule pull touched at least one game during this run; and no append-only table has fewer rows than after the previous run. A failure becomes a warning (phone alert) and does not fail the run. Known upstream errors that can't be fixed (e.g. an ESPN line score that contradicts its own final score) go in `ACKNOWLEDGED_PERIOD_MISMATCHES` with the reason, so they don't alert every night; the check logs a note if ESPN later fixes one so the entry can be removed.
+
 **API calls** all go through `http_client.fetch_json()`: 5 s connect and 30 s read timeouts, up to 3 retries (waits of 1, 2, 4 s, honoring `Retry-After`) for timeouts, dropped connections, HTTP 429 and 5xx, a 0.2 s pause between calls, and a clear `FetchError` naming the URL if it still fails. A 404 isn't retried.
 
-**Tests:** `venv/bin/python -m unittest discover -s tests -v` (14 tests, about 3 seconds). They run a throwaway local web server that returns 500s, 404s, garbage JSON and slow replies, and check the retry, timeout and alert logic without touching any real API.
+**Tests:** `venv/bin/python -m unittest discover -s tests -v` (39 tests, about 3 seconds). They run a throwaway local web server that returns 500s, 404s, garbage JSON and slow replies, and check the retry, timeout and alert logic without touching any real API.
 
 **Failure drill** (run after changing this machinery): on a throwaway copy, break something on purpose (an unreachable API URL, a wrong database name, a bad `.env` password) and confirm that the run exits 1, the other steps still run, a message reaches your phone, and the healthchecks.io check goes red. Never test against the live `.env` values without telling yourself first, since the alerts are real.
 

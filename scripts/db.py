@@ -135,7 +135,8 @@ def insert_player(
 ):
     """
     Insert a player into the players table.
-    Upserts on (league, external_id).
+    Upserts on (league, external_id). Every call counts as "seen on a roster":
+    it sets last_seen_at and clears departed_at (see sql/players_roster_tracking.sql).
     Returns the player_id.
     """
     with conn.cursor() as cur:
@@ -149,9 +150,11 @@ def insert_player(
                 shoots_catches,
                 contract_salary, contract_season,
                 contract_total_value, contract_years, contract_expires,
-                injury_status, draft_year, draft_round, draft_pick
+                injury_status, draft_year, draft_round, draft_pick,
+                last_seen_at, departed_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    clock_timestamp(), NULL)
             ON CONFLICT (league, external_id)
             DO UPDATE SET
                 name = EXCLUDED.name,
@@ -178,6 +181,10 @@ def insert_player(
                 draft_year = EXCLUDED.draft_year,
                 draft_round = EXCLUDED.draft_round,
                 draft_pick = EXCLUDED.draft_pick,
+                -- clock_timestamp(), not now(): now() is the START of the open
+                -- transaction, which would predate the roster pull's cutoff
+                last_seen_at = clock_timestamp(),
+                departed_at = NULL,  -- seen on a roster again: back (re-signed, traded back)
                 updated_at = now()
             RETURNING player_id;
             """,
@@ -213,6 +220,61 @@ def insert_player(
         player_id = cur.fetchone()[0]
     conn.commit()
     return player_id
+
+
+def count_on_roster(conn, team_id):
+    """How many players are currently marked as on this team's roster."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM players WHERE team_id = %s AND departed_at IS NULL;",
+            (team_id,),
+        )
+        return cur.fetchone()[0]
+
+
+def get_db_now(conn):
+    """The database's current time. Used as the "before tonight's pull" cutoff,
+    so it is compared against last_seen_at on the same clock that wrote it."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT clock_timestamp();")
+        return cur.fetchone()[0]
+
+
+def find_departing_players(conn, team_id, cutoff):
+    """Players marked on this team's roster who were NOT seen since `cutoff`,
+    i.e. missing from tonight's roster. Returns [(player_id, name, position)].
+    Read-only: nothing is marked until mark_players_departed() is called."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT player_id, name, position
+            FROM players
+            WHERE team_id = %s
+              AND departed_at IS NULL
+              AND COALESCE(last_seen_at, '-infinity') < %s
+            ORDER BY name;
+            """,
+            (team_id, cutoff),
+        )
+        return cur.fetchall()
+
+
+def mark_players_departed(conn, player_ids):
+    """Mark these players as having left their roster (rows are kept: they
+    still have box-score history). Returns how many were marked."""
+    if not player_ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE players SET departed_at = now()
+            WHERE player_id = ANY(%s) AND departed_at IS NULL;
+            """,
+            (list(player_ids),),
+        )
+        marked = cur.rowcount
+    conn.commit()
+    return marked
 
 
 def insert_game(

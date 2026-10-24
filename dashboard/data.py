@@ -230,9 +230,9 @@ def players(team_id):
                p.birth_state, p.birth_country, p.experience_years, p.college,
                p.headshot_url, p.shoots_catches, p.contract_salary,
                p.contract_expires, p.injury_status, p.status,
-               p.team_id = %(team_id)s AS on_roster
+               (p.team_id = %(team_id)s AND p.departed_at IS NULL) AS on_roster
         FROM players p
-        WHERE p.team_id = %(team_id)s
+        WHERE (p.team_id = %(team_id)s AND p.departed_at IS NULL)
            OR p.player_id IN (
                 SELECT a.player_id
                 FROM player_game_appearances a

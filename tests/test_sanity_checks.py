@@ -1,0 +1,202 @@
+"""
+Tests for scripts/sanity_checks.py using a fake database connection that returns
+canned rows, so they need no real database. Run from the project root:
+
+    venv/bin/python -m unittest discover -s tests -v
+"""
+
+import json
+import logging
+import os
+import sys
+import tempfile
+import unittest
+from datetime import datetime
+from pathlib import Path
+from unittest import mock
+
+_tmp = tempfile.TemporaryDirectory()
+os.environ.setdefault("LOG_DIR", _tmp.name)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+
+logging.getLogger("sports_hub").addHandler(logging.NullHandler())
+
+import sanity_checks as sc  # noqa: E402
+from run_report import RunReport  # noqa: E402
+
+
+class FakeCursor:
+    def __init__(self, answers):
+        self.answers, self.rows = answers, []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        flat = " ".join(sql.split())
+        for needle, rows in self.answers:  # first matching needle wins
+            if needle in flat:
+                self.rows = rows
+                return
+        raise AssertionError(f"FakeCursor has no answer for: {flat[:100]}")
+
+    def fetchall(self):
+        return self.rows
+
+
+class FakeConn:
+    """Answers each query with canned rows, picked by a snippet of the SQL."""
+
+    def __init__(self, answers):
+        self.answers = answers
+        self.rollbacks = 0
+
+    def cursor(self):
+        return FakeCursor(self.answers)
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
+# A healthy database: every check passes
+HEALTHY = [
+    ("count(*) FROM teams WHERE is_tracked", [(4,)]),
+    ("HAVING count(*) > 1", []),
+    ("WHERE NOT EXISTS ( SELECT 1 FROM teams t", []),
+    ("home_score IS NULL OR away_score IS NULL", []),
+    ("FROM game_periods GROUP BY game_id", []),
+    ("FROM player_game_appearances a", []),
+    ("max(last_updated)", [(False,)]),
+    ("SELECT count(*) FROM", [(10,)]),
+]
+
+
+def answers_with(**overrides):
+    """HEALTHY, with some answers replaced: answers_with(**{'needle': rows})."""
+    changed = [(n, overrides.pop(n)) if n in overrides else (n, r) for n, r in HEALTHY]
+    assert not overrides, f"unknown needle(s): {list(overrides)}"
+    return changed
+
+
+class IndividualCheckTests(unittest.TestCase):
+    def test_tracked_team_count_must_match(self):
+        conn = FakeConn(answers_with(**{"count(*) FROM teams WHERE is_tracked": [(5,)]}))
+        self.assertEqual(sc.check_tracked_teams(conn, 4), ["5 tracked teams, expected 4"])
+
+    def test_duplicate_tracked_team_is_named(self):
+        conn = FakeConn(answers_with(**{"HAVING count(*) > 1": [("NFL", "Indianapolis Colts")]}))
+        problems = sc.check_tracked_teams(conn, 4)
+        self.assertIn("NFL Indianapolis Colts", problems[0])
+
+    def test_healthy_data_passes_every_check(self):
+        conn = FakeConn(HEALTHY)
+        self.assertEqual(sc.check_tracked_teams(conn, 4), [])
+        self.assertEqual(sc.check_games_have_tracked_team(conn), [])
+        self.assertEqual(sc.check_final_games_have_scores(conn), [])
+        self.assertEqual(sc.check_period_sums(conn), [])
+        self.assertEqual(sc.check_box_scores_present(conn), [])
+        self.assertEqual(sc.check_games_fresh(conn, datetime.now().astimezone()), [])
+
+    def test_examples_are_capped(self):
+        rows = [("NHL", str(i)) for i in range(10)]
+        conn = FakeConn(answers_with(**{"FROM player_game_appearances a": rows}))
+        problem = sc.check_box_scores_present(conn)[0]
+        self.assertIn("10 final game(s)", problem)
+        self.assertEqual(problem.count("NHL "), sc.MAX_EXAMPLES)
+
+    def test_stale_games_are_flagged(self):
+        conn = FakeConn(answers_with(**{"max(last_updated)": [(True,)]}))
+        self.assertEqual(len(sc.check_games_fresh(conn, datetime.now().astimezone())), 1)
+
+
+class AcknowledgedMismatchTests(unittest.TestCase):
+    def test_acknowledged_game_is_not_reported(self):
+        key = next(iter(sc.ACKNOWLEDGED_PERIOD_MISMATCHES))
+        conn = FakeConn(answers_with(**{"FROM game_periods GROUP BY game_id": [key]}))
+        self.assertEqual(sc.check_period_sums(conn), [])
+
+    def test_a_new_mismatch_is_reported_alongside_an_acknowledged_one(self):
+        key = next(iter(sc.ACKNOWLEDGED_PERIOD_MISMATCHES))
+        conn = FakeConn(answers_with(**{"FROM game_periods GROUP BY game_id": [key, ("NFL", "999")]}))
+        problems = sc.check_period_sums(conn)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("NFL 999", problems[0])
+        self.assertNotIn(key[1], problems[0])
+
+    def test_resolved_acknowledgment_prompts_cleanup(self):
+        conn = FakeConn(HEALTHY)  # ESPN fixed it: the game no longer mismatches
+        with self.assertLogs("sports_hub.sanity", level="INFO") as logs:
+            self.assertEqual(sc.check_period_sums(conn), [])
+        self.assertIn("no longer occurs", "\n".join(logs.output))
+
+
+class RowCountTests(unittest.TestCase):
+    def test_shrinking_table_is_flagged(self):
+        problems = sc.check_row_counts({"games": 90, "teams": 5}, {"games": 100, "teams": 5})
+        self.assertEqual(problems, ["games shrank from 100 to 90 rows"])
+
+    def test_growth_and_equal_are_fine(self):
+        self.assertEqual(sc.check_row_counts({"games": 101, "teams": 5}, {"games": 100, "teams": 5}), [])
+
+    def test_no_previous_counts_means_nothing_to_compare(self):
+        self.assertEqual(sc.check_row_counts({"games": 1}, None), [])
+
+    def test_loading_previous_counts(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(sc.load_previous_counts("job", d))  # no file yet
+            (Path(d) / "last_job.json").write_text("not json")
+            self.assertIsNone(sc.load_previous_counts("job", d))  # garbage
+            (Path(d) / "last_job.json").write_text(json.dumps({"table_counts": {"games": 7}}))
+            self.assertEqual(sc.load_previous_counts("job", d), {"games": 7})
+
+
+class RunSanityChecksTests(unittest.TestCase):
+    def setUp(self):
+        for var in ("NTFY_TOPIC", "HEALTHCHECK_URL"):
+            os.environ.pop(var, None)
+
+    def test_clean_run_has_no_warnings_and_saves_counts(self):
+        report = RunReport("t_sane_clean")
+        sc.run_sanity_checks(FakeConn(HEALTHY), report, expected_tracked_teams=4)
+        self.assertEqual((report.errors, report.warnings), ([], []))
+        self.assertEqual(report.extra["table_counts"]["games"], 10)
+        self.assertEqual(report.counts["sanity problems"], 0)
+
+    def test_each_failed_check_becomes_one_warning(self):
+        answers = answers_with(**{
+            "FROM game_periods GROUP BY game_id": [("NFL", "111")],
+            "max(last_updated)": [(True,)],
+        })
+        report = RunReport("t_sane_bad")
+        sc.run_sanity_checks(FakeConn(answers), report, expected_tracked_teams=4)
+        self.assertEqual(report.errors, [])  # warnings never fail the run
+        self.assertEqual(
+            sorted(label for label, _ in report.warnings),
+            ["Sanity: games fresh", "Sanity: periods add up to scores"],
+        )
+        self.assertEqual(report.counts["sanity problems"], 2)
+
+    def test_a_check_that_itself_breaks_is_an_error_not_silence(self):
+        answers = [a for a in HEALTHY if a[0] != "max(last_updated)"]  # no answer: raises
+        report = RunReport("t_sane_broken")
+        sc.run_sanity_checks(FakeConn(answers), report, expected_tracked_teams=4)
+        self.assertEqual([label for label, _ in report.errors], ["Sanity check: games fresh"])
+
+    def test_row_count_shrink_is_warned_using_the_previous_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "last_t_sane_shrink.json").write_text(
+                json.dumps({"table_counts": {"games": 50}})
+            )
+            report = RunReport("t_sane_shrink")
+            with mock.patch.object(sc, "LOG_DIR", d):
+                sc.run_sanity_checks(FakeConn(HEALTHY), report, expected_tracked_teams=4)
+        # Yesterday's games count was 50 and today's database says 10: that's a shrink
+        self.assertEqual([label for label, _ in report.warnings], ["Sanity: row counts"])
+        self.assertIn("games shrank from 50 to 10 rows", report.warnings[0][1])
+
+
+if __name__ == "__main__":
+    unittest.main()

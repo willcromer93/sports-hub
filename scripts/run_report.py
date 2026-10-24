@@ -41,6 +41,7 @@ class RunReport:
         self.errors = []  # [(step label, "ErrorType: message")]
         self.warnings = []  # [(step label, message)]: suspicious, but not a crash
         self.counts = {}
+        self.extra = {}  # anything else worth saving in last_<job>.json (e.g. table counts)
         # Each job pings its own healthchecks.io check: the nightly pipeline uses
         # HEALTHCHECK_URL, others HEALTHCHECK_<NAME>_URL (unset = no ping).
         self.healthcheck_var = (
@@ -129,6 +130,7 @@ class RunReport:
             "ok_steps": len(self.ok_steps),
             "errors": [{"step": s, "error": e} for s, e in self.errors],
             "warnings": [{"step": s, "message": m} for s, m in self.warnings],
+            **self.extra,
         }
         try:
             Path(LOG_DIR).mkdir(parents=True, exist_ok=True)

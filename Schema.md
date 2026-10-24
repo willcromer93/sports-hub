@@ -83,8 +83,23 @@ and makes adding a new team a data-only change, not a schema change.
 | draft_round            | INTEGER     | currently always NULL, same reason                          |
 | draft_pick             | INTEGER     | currently always NULL, same reason                          |
 | updated_at             | TIMESTAMPTZ | defaults to now(); refreshed on every upsert               |
+| last_seen_at           | TIMESTAMPTZ | last time ESPN's roster for their team listed them; NULL for opponents' players |
+| departed_at            | TIMESTAMPTZ | when the nightly pull noticed they were gone; NULL while on the roster, cleared again if they reappear |
 
 Unique on (league, external_id).
+
+**Roster tracking.** `team_id` is the team a player was last seen on, and a
+roster pull only ever adds or updates players, so on its own it can't tell
+"still here" from "left in August". `last_seen_at` / `departed_at` (added by
+`sql/players_roster_tracking.sql`) record that: each roster pull stamps
+`last_seen_at` and clears `departed_at` for everyone ESPN lists, then marks
+anyone previously on the team's roster but missing tonight as departed.
+Rows are never deleted, because departed players still have box-score history.
+A safety rule (`scripts/roster_tracking.py`) refuses to mark departures when
+ESPN's roster comes back empty or under half its previous size, so a bad
+response can't wipe a roster. Players on non-tracked (opponent) teams come from
+box scores, not roster pulls, so both columns stay NULL for them.
+"Currently on the roster" means `team_id = X AND departed_at IS NULL`.
 
 ### games
 One row per game, stored home/away style — each game appears once, no
@@ -299,6 +314,12 @@ data collection started (2026) — not a player's full professional career.
 - The rollups cover our tracked teams' players only. Opponents' box scores
   are stored, but the dashboard aggregates them from `player_game_stats`
   directly ("stats vs our team" isn't a real season line).
-- `player_season_stats` / `player_career_stats` exist but have no data yet.
+- `player_season_stats` / `player_career_stats` are rebuilt from scratch every night from
+  `player_game_stats`, so their auto-numbered ids (`season_stat_id`, `career_stat_id`) are not
+  stable between runs (the `GROUP BY` has no `ORDER BY`). Nothing references them.
+- A departed player's *new* team is not recorded unless they join another tracked team.
+- One ESPN data error is known and acknowledged: NHL game 401892450 (Red Wings 5, Senators 3,
+  2026-10-06) has line scores summing to 4. See `ACKNOWLEDGED_PERIOD_MISMATCHES` in
+  `scripts/sanity_checks.py`.
 - `sql/schema.sql` is currently a Markdown snapshot, not runnable SQL — the
   Phase 1 tables can't yet be rebuilt from the repo alone.

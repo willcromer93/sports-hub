@@ -624,3 +624,34 @@ Audited this repo plus the two static sites (`willcromer93.github.io`, `links`).
 - A UPS for the server (unclean power loss on 2026-10-22).
 - Optional: `ORDER BY` in the rollup rebuild so ids are reproducible.
 - Next phases: C (roster-departure detection, post-run sanity checks), then D (all 7 leagues).
+
+### 2026-10-23 (continued) — Phase C: roster departures and sanity checks (built and tested; deploy pending)
+
+**The problem, measured on live data:** the nightly roster pull only adds or updates players, so anyone who left a roster kept their old `team_id` and looked current. **71 ghosts** across the tracked teams (Colts 35 of 112 rows, Red Wings 30 of 57, Pacers 4, Purdue 2); 40 of them had box-score history. The dashboard's `on_roster` flag was just `team_id = X`, so the Colts page called 112 people "on the roster" when ESPN lists 77.
+
+**Design decisions (asked, then built):** two timestamps (`last_seen_at`, `departed_at`) rather than a boolean; a "skip if the roster shrank to under 50%" guard rather than never auto-marking; fix the dashboard flag in the same phase.
+
+**What was built:**
+- `sql/players_roster_tracking.sql` (idempotent; **refuses to run** unless a tracked-team player was updated in the last 36 h, because its backfill treats "not seen in 36 h" as "departed"; tested on a scratch copy: stale DB rejected and rolled back, backfill matches the measured ghost counts, rerun changes nothing).
+- `db.py`: `insert_player` now stamps `last_seen_at` and clears `departed_at`; new `count_on_roster`, `get_db_now`, `find_departing_players` (read-only), `mark_players_departed`.
+- `roster_tracking.py`: the pure decision rule `decide_departures` (empty roster or under 50% of previous: record nothing and warn; over 25% departing: record, with a heads-up alert). 9 unit tests incl. boundaries and a realistic NFL cutdown (90 to 53).
+- `api_pulls.py`: `pull_roster` counts the roster before, fetches, upserts, then finds and marks the missing players; per-team departures go in the log and run counts.
+- `sanity_checks.py` (called at the end of the nightly run; warnings only): tracked team count and duplicates, every game has a tracked team, final games have scores, **periods add up to the final score**, final games older than 36 h have a box score, the schedule pull touched games during this run, and append-only tables never shrink (counts are saved in `last_pipeline.json` as `table_counts`). A check that itself breaks is recorded as an error, never silently skipped. `RunReport` gained an `extra` dict that is saved in the result file.
+- Dashboard `data.py`: `on_roster = team_id = X AND departed_at IS NULL`, and the player list is "current roster + anyone with a box score for this team" (matching its docstring). Colts: 77 on roster (was claimed 112), dropdown 99 = 77 + 22 departed with history; 13 phantom rows that never played drop out. The Player page already had a "No longer on the current roster" caption that the old flag never triggered.
+- `Schema.md` and README updated; a stale "rollups have no data yet" line in Known gaps corrected.
+
+**How it was verified (scratch database copy of the real data; alerts disabled):**
+- 39 unit tests (`python -m unittest discover -s tests`), about 3 s, on both Python 3.12 and 3.14.
+- Five-night replay with the real `pull_roster` and the real ESPN Colts roster: 3 players leave (exactly those 3 flagged, no alert); ESPN glitch with 2 players (nothing recorded, warning); normal again (all 3 back, nobody else wrongly marked); cutdown day, 40% leave (recorded with a heads-up, not blocked); everyone back (fully restored).
+- Sanity drill: clean data gave **0 warnings**; seven deliberate breakages (duplicate tracked team, a game with no tracked team, a final game without a score, a changed period score, a deleted box score, stale games, a shrunken table) gave **exactly 7 warnings and 0 errors**.
+- All 4 teams x 4 dashboard pages (16) load without exceptions through Streamlit's AppTest, each showing the correct team; a departed Colt shows the "No longer on the current roster" note and a current one doesn't.
+
+**Findings and bugs caught along the way:**
+- **A real upstream data error:** NHL game 401892450 (Red Wings 5, Senators 3, 2026-10-06): ESPN's own line scores are 2-2-0 (total 4) but its final score is 5; our data faithfully copies ESPN's inconsistency. Acknowledged in `ACKNOWLEDGED_PERIOD_MISMATCHES` with the reason (otherwise it would alert every night forever), and the check logs a note if ESPN ever fixes it. All 4 other shootout games add up correctly.
+- **Design flaw caught by the drill, in my own check:** "games updated in the last 36 h" would have let a single silent failure of the schedule step through (last night's rows are only about 24 h old at 4 AM). Changed to "at least one game touched since this run started".
+- **A subtle Postgres trap caught while reviewing:** `now()` is the start of the current *transaction*, and psycopg2 keeps one open after any read, so a `last_seen_at = now()` stamp would predate the roster pull's cutoff and mark players seen tonight as departed. Used `clock_timestamp()`; the replay confirms nobody is wrongly marked.
+- Test-harness mistakes (not product bugs): a sloppy assertion in my own test; a test loop that silently dropped the "select this team" line and tested the default team four times (found and redone, now asserting each team really switched); the dashboard copy needed a sibling `scripts/` folder; `showErrorDetails = "none"` hides tracebacks in tests (use `STREAMLIT_CLIENT_SHOW_ERROR_DETAILS=full`); macOS `sed` choked on nested quotes.
+
+**Deploy plan (needs Will's approval; the migration changes the live database):** manual backup, migration on live right after a nightly pull (the guard enforces it), push, `git pull` on the server, one real run (expect 0 new departures and 0 sanity warnings), restart the dashboard service so it loads the new query (needs sudo), then watch the 4 AM run.
+
+**Still open:** rotate the ntfy topic; optional extra healthchecks.io checks; UPS; `ORDER BY` in the rollup rebuild; Phase D (all 7 leagues). Note for Phase D: once every team is tracked, "every game has exactly one tracked team" becomes "two"; the current check only requires at least one.

@@ -16,7 +16,10 @@ from dataclasses import dataclass
 
 from db import (
     box_score_rows,
+    count_on_roster,
+    find_departing_players,
     get_connection,
+    get_db_now,
     get_games_missing_box_scores,
     get_games_missing_periods,
     insert_box_score,
@@ -24,6 +27,7 @@ from db import (
     insert_game_periods,
     insert_player,
     insert_team,
+    mark_players_departed,
     rebuild_stat_rollups,
     upsert_opponent_team,
 )
@@ -31,7 +35,9 @@ from dotenv import load_dotenv
 from espn import fetch_summary, parse_periods, parse_team_box_score
 from http_client import fetch_json
 from log_setup import setup_logging
+from roster_tracking import decide_departures
 from run_report import RunReport
+from sanity_checks import run_sanity_checks
 
 # --- Load API key from .env ---
 load_dotenv()
@@ -369,9 +375,12 @@ def insert_roster_player(conn, team_id, league, a):
     )
 
 
-def pull_roster(conn, team, team_id):
-    """Pull a team's roster from ESPN and upsert every player.
-    Returns the number of players."""
+def pull_roster(conn, team, team_id, report):
+    """Pull a team's roster from ESPN, upsert every player, then mark anyone who
+    was on the roster but is missing tonight as departed (see roster_tracking.py
+    for the safety rule). Returns the number of players ESPN listed."""
+    previous_on_roster = count_on_roster(conn, team_id)
+    cutoff = get_db_now(conn)  # players seen from here on get last_seen_at after this
     roster = fetch_json(
         f"{ESPN_BASE}/{team.sport_path}/teams/{team.espn_slug}/roster"
     )
@@ -392,6 +401,18 @@ def pull_roster(conn, team, team_id):
         player_id = insert_roster_player(conn, team_id, team.league, a)
         log.debug("player_id %s: %s", player_id, a["fullName"])
     log.info("%s roster: %d players", team.label, len(athletes))
+
+    departing = find_departing_players(conn, team_id, cutoff)
+    decision = decide_departures(previous_on_roster, len(athletes), len(departing))
+    if not decision.record:
+        report.warn(f"{team.label} roster", decision.warning)
+    elif departing:
+        mark_players_departed(conn, [player_id for player_id, _name, _pos in departing])
+        names = ", ".join(f"{name} ({pos})" for _id, name, pos in departing)
+        log.info("%s departed (%d): %s", team.label, len(departing), names)
+        report.count(f"{team.label} departed", len(departing))
+        if decision.heads_up:
+            report.warn(f"{team.label} roster", decision.heads_up)
     return len(athletes)
 
 
@@ -415,10 +436,8 @@ def main():
             if team.label not in team_ids:
                 continue  # no team row, so its roster and games can't be loaded
             with report.step(f"{team.label} roster"):
-                players = pull_roster(conn, team, team_ids[team.label])
+                players = pull_roster(conn, team, team_ids[team.label], report)
                 report.count(f"{team.label} players", players)
-                if players == 0:
-                    report.warn(f"{team.label} roster", "ESPN returned 0 players")
 
         # --- Games (ESPN schedules) ---
         # Needs each tracked team's team_id, so it runs after the teams are inserted.
@@ -449,6 +468,9 @@ def main():
             season_rows, career_rows = rebuild_stat_rollups(conn)
             report.count("season rollup rows", season_rows)
             report.count("career rollup rows", career_rows)
+
+        # --- Sanity checks on the finished data (warnings only; see sanity_checks.py) ---
+        run_sanity_checks(conn, report, expected_tracked_teams=len(TRACKED_TEAMS))
     finally:
         conn.close()
 
