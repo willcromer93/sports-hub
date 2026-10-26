@@ -801,3 +801,24 @@ Audited this repo plus the two static sites (`willcromer93.github.io`, `links`).
 - The first trial's "the 404 stopped everything" would NOT have been visible in a four-team run: scale and new leagues are what expose a missing page, which is why every league goes through staging first.
 
 **Live deployment order for D3 (needs Will's approval): fresh backup; apply BOTH migrations on live first (the new code queries `summary_unavailable_at`); push and pull (this also changes the existing nightly run: per-game isolation and the 404 retries apply to NBA/NFL/NHL too); add WNBA to `LEAGUES_ALL`; first load by hand in the background (about 6.5 min); gate WNBA on live; test the 24 dashboard pages; second run; keep only if everything passes (rollback = remove WNBA from `LEAGUES_ALL`).**
+
+### 2026-10-25 (late) — Phase D3 live: WNBA is collected on the server
+
+**Approved by Will; executed in this order (rollback = set `LEAGUES_ALL` back to `NBA,NFL,NHL`; the added WNBA rows would stay):**
+1. Pre-flight (22:58): services up, last run ok, lock free, server tree clean at `752b5aa`, neither new migration present, next cron job 03:30.
+2. Fresh backup `sports_hub_2026-10-25_2259.dump` (3.8 MB, 9 tables readable).
+3. **Migrations on live BEFORE the code** (the new code queries `summary_unavailable_at`): `sql/games_summary_unavailable.sql` and `sql/sport_period_labels_new_leagues.sql`; counts unchanged; `dashboard_ro` still reads and still cannot write.
+4. Pushed `752b5aa..f006035`; pulled (clean tree, 118 tests pass on Python 3.14, checksums match the Mac).
+5. Changed `LEAGUES_ALL` to `NBA,NFL,NHL,WNBA` and ran the first load by hand in the background with the exact cron command and lock: **exit 0, 390 s, 39 steps, 0 failed, 0 warnings, 0 sanity problems.** Live went from 95 tracked teams / 5,081 players / 3,029 games / 311,119 stat rows to **110 tracked teams (NBA 30, NFL 32, NHL 32, WNBA 15, NCAAB 1) / 5,417 players / 3,402 games / 430,479 stat rows**, identical to the staging rehearsal; DB 139 MB. WNBA: 221 players, 368 period scores, 736 box-score sides; the same **2 games ESPN has no summary for** (401856947 on 2026-05-29, 401856954 on 2026-06-01) flagged and skipped. Featured teams untouched; cron log empty.
+6. **Gates on live: 32 of 32 PASS** (WNBA 15/15 teams, 729/729 tracked sides with a box score plus 4 flagged sides excluded, 367/367 finals add up; NBA 217/217; NFL 308/308; NHL 496/496 with 3 acknowledged ESPN errors).
+7. **Dashboard on live data as `dashboard_ro`: 24 pages, 0 exceptions, right team on each, slowest 0.5 s, median 0.1 s; dropdowns unchanged (Colts 98, Red Wings 42, Pacers 20, Purdue 16); public site 200.**
+8. **Second run on live:** exit 0 in 187 s, nothing changed, 0 warnings, no period or box-score work, no departures.
+9. Cleanup: removed the rollback copy of `.env` I had saved before editing it (it held secrets), and the temporary trial files; `.env` is mode 600 with `LEAGUES_ALL=NBA,NFL,NHL,WNBA`.
+
+**This deploy also changed the existing nightly run for NBA/NFL/NHL** (per-game isolation of period and box-score pulls, 404 retries, flagged-game handling), tested on staging for all four leagues first.
+
+**Cost now:** about 3 min and about 450 API calls a night; backups about 4 MB each; DB 139 MB.
+
+**To watch tomorrow morning:** `logs/last_pipeline.json` (04:00 start, about 2.5 to 3 minutes, ok, 0 warnings), the healthchecks.io check green, `logs/backup.log`. A new thing to watch: the `summary gaps` sanity check should stay quiet (2 flagged games out of 369 WNBA finals).
+
+**Open items:** (1) **before college basketball (D4): merge the period-score and box-score steps so each game's summary is fetched once** (still fetched twice per game on a first load: 1,186 calls in the WNBA trial for 368 games), and decide the `summary gaps` threshold for college (small-school games often have no summary); (2) D4 college basketball (362 teams, weekly roster refresh, season-aware schedule fetching), D5 college football (FBS, 138 teams), D6 MLB (new box-score parser; extend the case-sensitive `NON_ADDITIVE_STAT_PATTERN` for `AVG/OBP/SLG/ERA/OPS/WHIP` first); (3) Phase E: Will's full redesign of the site and its tabs; (4) rotate the ntfy topic, optional extra healthchecks, a UPS.
