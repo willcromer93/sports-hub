@@ -132,6 +132,7 @@ announced yet (common for Purdue) — there's no column to flag that yet.
 | venue_name      | TEXT        |                                                            |
 | is_neutral_site | BOOLEAN     | default false                                              |
 | last_updated    | TIMESTAMPTZ | defaults to now()                                          |
+| summary_unavailable_at | TIMESTAMPTZ | NULL for normal games; set when ESPN's summary page for this finished game was still a 404 after retries (so it has no box score or period scores). The pipeline stops asking, rechecks after 3 days, and clears it when a summary arrives. Added by `sql/games_summary_unavailable.sql` |
 
 Unique on (league, external_id). Check: `home_team_id <> away_team_id`.
 Indexes: only the two that come with the primary key and the unique constraint.
@@ -178,7 +179,12 @@ there are in regulation. Seeded by `sql/phase2_games_schema.sql`.
 | NCAAB  | Half         | 2                  |
 | NHL    | Period       | 3                  |
 | NFL    | Quarter      | 4                  |
+| WNBA   | Quarter      | 4                  |
+| CFB    | Quarter      | 4                  |
+| MLB    | Inning       | 9                  |
 
+The last three rows come from `sql/sport_period_labels_new_leagues.sql`. **A league with no row here gets no
+period scores at all** (the period pull joins this table): the first WNBA trial filled 0 of 369 games for that reason.
 ### player_game_appearances
 One row per player per game. Exists as a separate table (rather than
 inferring "played" from the presence of stat rows) so a missing row can be

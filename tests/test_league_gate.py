@@ -77,8 +77,8 @@ class RosterTests(unittest.TestCase):
 
 
 class BoxScoreTests(unittest.TestCase):
-    def check(self, total, missing):
-        return gate.gate_box_scores(FakeConn(("FROM games g JOIN teams t", [(total, missing)])), NBA)
+    def check(self, total, missing, flagged=0):
+        return gate.gate_box_scores(FakeConn(("FROM games g JOIN teams t", [(total, missing, flagged)])), NBA)
 
     def test_full_coverage_passes(self):
         self.assertEqual(self.check(200, 0).status, "PASS")
@@ -89,6 +89,17 @@ class BoxScoreTests(unittest.TestCase):
 
     def test_no_games_yet_is_a_review_not_a_pass(self):
         self.assertEqual(self.check(0, 0).status, "REVIEW")
+
+    def test_games_espn_has_no_summary_for_do_not_count_against_coverage(self):
+        r = self.check(200, 0, flagged=4)  # 4 of 204 sides = 2%
+        self.assertEqual(r.status, "PASS")
+        self.assertIn("4 side(s)", r.detail)
+
+    def test_too_many_flagged_sides_is_a_review(self):
+        self.assertEqual(self.check(180, 0, flagged=20).status, "REVIEW")  # 10% of the sides
+
+    def test_missing_box_scores_still_fail_even_with_flagged_games_around(self):
+        self.assertEqual(self.check(100, 5, flagged=2).status, "FAIL")
 
 
 class PeriodScoreTests(unittest.TestCase):

@@ -73,11 +73,28 @@ class FetchJsonTests(unittest.TestCase):
         self.assertIn(self.url, str(ctx.exception))
         self.assertEqual(FakeAPI.hits, 1 + http_client.RETRIES)  # first try + retries
 
-    def test_404_is_not_retried(self):
-        FakeAPI.script = [(404, "{}", 0)]
-        with self.assertRaises(http_client.FetchError):
+    def test_a_404_is_retried_because_espn_returns_them_transiently(self):
+        # Seen for real: a valid roster URL answered 404 once, then worked
+        FakeAPI.script = [(404, "{}", 0), (200, '{"n": 2}', 0)]
+        self.assertEqual(http_client.fetch_json(self.url), {"n": 2})
+        self.assertEqual(FakeAPI.hits, 2)
+
+    def test_a_404_that_persists_fails_and_reports_the_status_code(self):
+        FakeAPI.script = [(404, "{}", 0)] * 10
+        with self.assertRaises(http_client.FetchError) as ctx:
             http_client.fetch_json(self.url)
-        self.assertEqual(FakeAPI.hits, 1)
+        self.assertEqual(ctx.exception.status_code, 404)
+        self.assertEqual(FakeAPI.hits, 1 + http_client.RETRIES)
+
+    def test_other_errors_carry_their_status_and_no_reply_means_none(self):
+        FakeAPI.script = [(500, "{}", 0)] * 10
+        with self.assertRaises(http_client.FetchError) as ctx:
+            http_client.fetch_json(self.url)
+        self.assertEqual(ctx.exception.status_code, 500)
+        FakeAPI.script = [(200, "<html>oops</html>", 0)]
+        with self.assertRaises(http_client.FetchError) as ctx:
+            http_client.fetch_json(self.url)
+        self.assertIsNone(ctx.exception.status_code)  # a reply, but not JSON
 
     def test_invalid_json_is_an_error(self):
         FakeAPI.script = [(200, "<html>oops</html>", 0)]

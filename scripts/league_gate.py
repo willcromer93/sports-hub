@@ -29,6 +29,7 @@ from sanity_checks import ACKNOWLEDGED_PERIOD_MISMATCHES, check_featured_teams
 from team_discovery import discover_teams
 
 MIN_COVERAGE = 0.99  # box scores and period scores must exist/add up for 99%+ of games
+MAX_GAP_RATE = 0.05  # more flagged-as-no-summary sides than this is a REVIEW
 MAX_EXAMPLES = 5
 # Kept-as-additive stat names that look like rates, for the human review of stat names
 LOOKS_LIKE_A_RATE = re.compile(r"(?i)(pct|percent|avg|average|rate|ratio|era\b|whip|ops\b|obp|slg|per|/)")
@@ -79,24 +80,33 @@ def gate_rosters(conn, league):
 
 
 def gate_box_scores(conn, league):
-    """Every tracked side of every final game should have a box score."""
-    ((total, missing),) = _fetch(
+    """Every tracked side of every final game should have a box score. Games ESPN has no
+    summary for (flagged) are known gaps: reported separately, not counted against coverage."""
+    ((total, missing, flagged),) = _fetch(
         conn,
         """
-        SELECT count(*), count(*) FILTER (WHERE NOT EXISTS (
+        SELECT count(*) FILTER (WHERE g.summary_unavailable_at IS NULL),
+               count(*) FILTER (WHERE g.summary_unavailable_at IS NULL AND NOT EXISTS (
                    SELECT 1 FROM player_game_appearances a
-                   WHERE a.game_id = g.game_id AND a.team_id = t.team_id))
+                   WHERE a.game_id = g.game_id AND a.team_id = t.team_id)),
+               count(*) FILTER (WHERE g.summary_unavailable_at IS NOT NULL)
         FROM games g
         JOIN teams t ON t.is_tracked AND t.league = %s AND t.team_id IN (g.home_team_id, g.away_team_id)
         WHERE g.league = %s AND g.status = 'final';
         """,
         (league.code, league.code),
     )
+    if total + flagged == 0:
+        return Result("Box scores", "REVIEW", "no final games yet, so there is nothing to check")
     coverage = _pct(total - missing, total)
     detail = f"{total - missing} of {total} tracked sides have a box score ({coverage:.1f}%)"
-    if total == 0:
-        return Result("Box scores", "REVIEW", "no final games yet, so there is nothing to check")
-    return Result("Box scores", "PASS" if coverage >= 100 * MIN_COVERAGE else "FAIL", detail)
+    if flagged:
+        detail += f"; {flagged} side(s) belong to games ESPN has no summary for (flagged, excluded)"
+    if coverage < 100 * MIN_COVERAGE:
+        return Result("Box scores", "FAIL", detail)
+    if flagged / (total + flagged) > MAX_GAP_RATE:
+        return Result("Box scores", "REVIEW", detail + f": over {MAX_GAP_RATE:.0%} of the league's sides, look at why")
+    return Result("Box scores", "PASS", detail)
 
 
 def gate_period_scores(conn, league):
@@ -110,7 +120,7 @@ def gate_period_scores(conn, league):
         FROM games g
         LEFT JOIN (SELECT game_id, sum(home_score) AS h, sum(away_score) AS a
                    FROM game_periods GROUP BY game_id) p USING (game_id)
-        WHERE g.league = %s AND g.status = 'final';
+        WHERE g.league = %s AND g.status = 'final' AND g.summary_unavailable_at IS NULL;
         """,
         (league.code,),
     )

@@ -70,6 +70,7 @@ HEALTHY = [
     ("home_score IS NULL OR away_score IS NULL", []),
     ("FROM game_periods GROUP BY game_id", []),
     ("AND EXISTS (SELECT 1 FROM game_periods", []),
+    ("FILTER (WHERE g.summary_unavailable_at IS NOT NULL)", []),
     ("FROM player_game_appearances a", []),
     ("max(last_updated)", [(False,)]),
     ("SELECT count(*) FROM", [(10,)]),
@@ -200,6 +201,33 @@ class PeriodMismatchJudgementTests(unittest.TestCase):
     def test_acknowledged_games_do_not_count_toward_the_rate(self):
         ack = [key + (False,) for key in sc.ACKNOWLEDGED_PERIOD_MISMATCHES if key[0] == "NHL"]
         self.assertEqual(self.check(ack, [("NHL", len(ack) + 1)]), [])
+
+
+class SummaryGapTests(unittest.TestCase):
+    """Games ESPN has no summary for are flagged; a league with many of them is reported."""
+
+    NEEDLE = "FILTER (WHERE g.summary_unavailable_at IS NOT NULL)"
+
+    def check(self, rows):
+        return sc.check_summary_gaps(FakeConn(answers_with(**{self.NEEDLE: rows})))
+
+    def test_a_few_gaps_in_a_big_league_are_normal(self):
+        self.assertEqual(self.check([("WNBA", 2, 369)]), [])
+
+    def test_many_gaps_in_a_league_are_reported(self):
+        problems = self.check([("NCAAB", 40, 300), ("NBA", 1, 400)])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("NCAAB: 40 of 300", problems[0])
+
+    def test_the_boundaries(self):
+        self.assertEqual(self.check([("NHL", 10, 200)]), [])  # exactly 5%: fine
+        self.assertEqual(len(self.check([("NHL", 11, 200)])), 1)  # just over
+        self.assertEqual(self.check([("NHL", 9, 20)]), [])  # 45%, but under 10 games: too few to judge
+
+    def test_the_box_score_check_ignores_flagged_games(self):
+        # (the SQL excludes them; this pins that the exclusion is there)
+        import inspect
+        self.assertIn("summary_unavailable_at IS NULL", inspect.getsource(sc.check_box_scores_present))
 
 
 class RowCountTests(unittest.TestCase):

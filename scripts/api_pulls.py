@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 from db import (
     box_score_rows,
+    clear_summary_unavailable,
     count_on_roster,
     find_departing_players,
     get_connection,
@@ -28,6 +29,7 @@ from db import (
     insert_game_periods,
     insert_player,
     mark_players_departed,
+    mark_summary_unavailable,
     rebuild_stat_rollups,
     set_team_venue,
     upsert_league_team,
@@ -35,7 +37,7 @@ from db import (
 )
 from dotenv import load_dotenv
 from espn import fetch_summary, parse_periods, parse_team_box_score
-from http_client import fetch_json
+from http_client import FetchError, fetch_json
 from leagues import FEATURED_TEAMS, LEAGUES, featured_teams, leagues_all
 from log_setup import setup_logging
 from roster_tracking import decide_departures
@@ -188,53 +190,86 @@ def pull_games(conn, league, sport_path, espn_team_id, our_team_id):
     return game_count
 
 
-def pull_game_periods(conn):
+def fetch_game_summary(conn, game_id, league, external_id):
+    """ESPN's summary for one finished game, or None if ESPN has none.
+
+    "None" means ESPN still answers 404 after the HTTP client's retries (one 404 proves
+    nothing: ESPN has been seen answering 404 for a valid URL that works seconds later).
+    The game is then flagged (games.summary_unavailable_at) so it isn't requested every
+    night, and rechecked after 3 days. Any other failure propagates: the caller isolates
+    it. A summary that does arrive for a flagged game clears the flag."""
+    try:
+        summary = fetch_summary(league, external_id)
+    except FetchError as exc:
+        if exc.status_code == 404:
+            mark_summary_unavailable(conn, game_id)
+            log.info("ESPN has no summary for %s game %s (flagged, rechecked in 3 days)", league, external_id)
+            return None
+        raise
+    clear_summary_unavailable(conn, game_id)
+    return summary
+
+
+def pull_game_periods(conn, report):
     """Fill in game_periods for every final game that doesn't have them yet.
     Uses ESPN's per-game summary endpoint (the schedule endpoint has no
-    per-period scores) — one request per game, but only for games not
+    per-period scores): one request per game, but only for games not
     already filled in, so a typical night is just the previous day's games.
+    Each game is its own unit (report.each), so one bad game never blocks the rest.
     Returns the number of games filled in."""
-    filled = 0
-    for game_id, league, external_id, regulation_periods in get_games_missing_periods(
-        conn
-    ):
-        periods = parse_periods(fetch_summary(league, external_id), regulation_periods)
+    games = get_games_missing_periods(conn)
+
+    def fill(game):
+        game_id, league, external_id, regulation_periods = game
+        summary = fetch_game_summary(conn, game_id, league, external_id)
+        if summary is None:
+            return 0
+        periods = parse_periods(summary, regulation_periods)
         if periods is None:
-            log.warning(
-                "No usable period scores for %s game %s, skipping", league, external_id
-            )
-            continue
+            log.warning("No usable period scores for %s game %s, skipping", league, external_id)
+            return 0
         insert_game_periods(conn, game_id, periods)
-        filled += 1
+        return 1
 
-    return filled
+    results = report.each(
+        "Period scores", games, fill, name=lambda game: f"{game[1]} {game[2]}"
+    )
+    return sum(filled for _game, filled in results)
 
 
-def pull_box_scores(conn):
+def pull_box_scores(conn, report):
     """Fill in player_game_appearances and player_game_stats for both teams in
-    every final game, from ESPN's per-game summary endpoint. Each side (our
-    team, the opponent) is filled in separately, only if it's missing.
-    Opponent players who aren't in `players` yet get a minimal row.
-    Returns the number of sides filled in."""
-    filled = 0
-    summaries = {}  # both sides of a game come from the same ESPN response
-    for game_id, league, external_id, team_id, espn_id in get_games_missing_box_scores(
-        conn
-    ):
-        if game_id not in summaries:
-            summaries[game_id] = fetch_summary(league, external_id)
-        parsed = parse_team_box_score(summaries[game_id], espn_id, league)
-        if not parsed:
-            log.warning(
-                "No box score for team %s in %s game %s", team_id, league, external_id
-            )
-            continue
-        insert_box_score(
-            conn, game_id, team_id, box_score_rows(conn, team_id, league, parsed)
-        )
-        filled += 1
+    every final game, from ESPN's per-game summary endpoint. Each side (the team,
+    the opponent) is filled in separately, only if it's missing, and both sides of
+    a game come from one request. Opponent players who aren't in `players` yet get
+    a minimal row. Each game is its own unit (report.each), so one bad game never
+    blocks the rest. Returns the number of sides filled in."""
+    games = {}  # game_id -> (league, external_id, [(team_id, espn_id), ...]); order kept
+    for game_id, league, external_id, team_id, espn_id in get_games_missing_box_scores(conn):
+        games.setdefault(game_id, (league, external_id, []))[2].append((team_id, espn_id))
 
-    return filled
+    def fill(item):
+        game_id, (league, external_id, sides) = item
+        summary = fetch_game_summary(conn, game_id, league, external_id)
+        if summary is None:
+            return 0
+        filled = 0
+        for team_id, espn_id in sides:
+            parsed = parse_team_box_score(summary, espn_id, league)
+            if not parsed:
+                log.warning("No box score for team %s in %s game %s", team_id, league, external_id)
+                continue
+            insert_box_score(conn, game_id, team_id, box_score_rows(conn, team_id, league, parsed))
+            filled += 1
+        return filled
+
+    results = report.each(
+        "Box scores",
+        list(games.items()),
+        fill,
+        name=lambda item: f"{item[1][0]} {item[1][1]}",
+    )
+    return sum(filled for _item, filled in results)
 
 
 # --- Teams, rosters and schedules, league by league ---
@@ -478,9 +513,9 @@ def main():
         # --- Game periods and box scores (ESPN per-game summaries) ---
         # After the games pull, so games that just went final get filled in.
         with report.step("Game periods"):
-            report.count("periods filled", pull_game_periods(conn))
-        with report.step("Box scores"):
-            report.count("box score sides filled", pull_box_scores(conn))
+            report.count("periods filled", pull_game_periods(conn, report))
+        with report.step("Box score pull"):
+            report.count("box score sides filled", pull_box_scores(conn, report))
 
         # --- Season/career rollups (rebuilt from player_game_stats) ---
         with report.step("Rollups"):

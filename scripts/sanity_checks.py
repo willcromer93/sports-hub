@@ -29,6 +29,11 @@ RECENT_DAYS = 3  # a mismatch on a game finished this recently is reported (once
 SYSTEMIC_RATE = 0.02  # more than 2% of a league's finals mismatching is no ESPN quirk
 MIN_GAMES_FOR_RATE = 50  # ...but only judge a rate once a league has this many games
 
+# Games ESPN has no summary page for (games.summary_unavailable_at) are known gaps, not
+# failures. A league with MANY of them is a different matter:
+MAX_GAP_RATE = 0.05  # more than 5% of a league's finals...
+MIN_GAP_GAMES = 10  # ...and at least this many games, is reported
+
 # Known upstream data errors we have looked into and can't fix, so they don't alert
 # every night. Each entry says WHY. If ESPN later corrects one, the check logs a note
 # so the entry can be deleted. Keys are (league, ESPN event id).
@@ -221,6 +226,7 @@ def check_box_scores_present(conn):
         FROM games g
         JOIN teams t ON t.is_tracked AND t.team_id IN (g.home_team_id, g.away_team_id)
         WHERE g.status = 'final'
+          AND g.summary_unavailable_at IS NULL
           AND g.game_time < now() - make_interval(hours => %s)
           AND NOT EXISTS (
               SELECT 1 FROM player_game_appearances a
@@ -233,6 +239,29 @@ def check_box_scores_present(conn):
     if not rows:
         return []
     return [f"{len(rows)} final game(s) older than {STALE_HOURS}h have no box score (e.g. {_examples(rows)})"]
+
+
+def check_summary_gaps(conn):
+    """Finished games ESPN has no summary for are flagged and skipped (they cannot have a
+    box score or period scores). A few per league is normal; a league where more than
+    MAX_GAP_RATE of the finals are flagged usually means ESPN's summary service is failing,
+    or a whole class of games has no data, which is worth a look."""
+    rows = _fetch(
+        conn,
+        """
+        SELECT g.league,
+               count(*) FILTER (WHERE g.summary_unavailable_at IS NOT NULL),
+               count(*)
+        FROM games g
+        WHERE g.status = 'final'
+        GROUP BY g.league;
+        """,
+    )
+    return [
+        f"{league}: {flagged} of {total} final games ({100 * flagged / total:.1f}%) have no ESPN summary"
+        for league, flagged, total in sorted(rows)
+        if flagged >= MIN_GAP_GAMES and flagged / total > MAX_GAP_RATE
+    ]
 
 
 def check_games_fresh(conn, since):
@@ -289,6 +318,7 @@ def run_sanity_checks(conn, report, expected_tracked, featured):
         ("final games have scores", lambda: check_final_games_have_scores(conn)),
         ("periods add up to scores", lambda: check_period_sums(conn)),
         ("box scores present", lambda: check_box_scores_present(conn)),
+        ("summary gaps", lambda: check_summary_gaps(conn)),
         ("games fresh", lambda: check_games_fresh(conn, report.started.astimezone())),
     ]
     problem_total = 0

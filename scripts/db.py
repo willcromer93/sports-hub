@@ -377,10 +377,41 @@ def get_games_missing_periods(conn):
               AND NOT EXISTS (
                   SELECT 1 FROM game_periods p WHERE p.game_id = g.game_id
               )
+              AND (g.summary_unavailable_at IS NULL
+                   OR g.summary_unavailable_at < now() - interval '3 days')
             ORDER BY g.game_time;
             """
         )
         return cur.fetchall()
+
+
+def mark_summary_unavailable(conn, game_id):
+    """Remember that ESPN has no summary for this finished game (still a 404 after
+    retries), so the pipeline stops asking every night. get_games_missing_* rechecks
+    it after 3 days."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE games SET summary_unavailable_at = now() WHERE game_id = %s;",
+            (game_id,),
+        )
+    conn.commit()
+
+
+def clear_summary_unavailable(conn, game_id):
+    """A summary arrived for a game that was flagged: unflag it. Does nothing (and
+    writes nothing) for the normal, unflagged game."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE games SET summary_unavailable_at = NULL
+            WHERE game_id = %s AND summary_unavailable_at IS NOT NULL;
+            """,
+            (game_id,),
+        )
+        changed = cur.rowcount
+    if changed:
+        conn.commit()
+    return changed
 
 
 def insert_game_periods(conn, game_id, periods, replace=False):
@@ -432,6 +463,8 @@ def get_games_missing_box_scores(conn):
                   SELECT 1 FROM player_game_appearances a
                   WHERE a.game_id = g.game_id AND a.team_id = t.team_id
               )
+              AND (g.summary_unavailable_at IS NULL
+                   OR g.summary_unavailable_at < now() - interval '3 days')
             ORDER BY g.game_time, t.is_tracked DESC;
             """
         )
@@ -560,6 +593,7 @@ def get_recent_final_games(conn, days):
             JOIN teams home ON home.team_id = g.home_team_id
             JOIN teams away ON away.team_id = g.away_team_id
             WHERE g.status = 'final'
+              AND g.summary_unavailable_at IS NULL
               AND g.game_time >= now() - make_interval(days => %s)
             ORDER BY g.game_time;
             """,

@@ -774,3 +774,30 @@ Audited this repo plus the two static sites (`willcromer93.github.io`, `links`).
 **What to check tomorrow morning:** `logs/last_pipeline.json` with a 04:00 start and about 2-3 minutes, status ok, 0 warnings; the healthchecks check green; `logs/backup.log` (backups are now about 3.6 MB each, 30 kept = about 110 MB).
 
 **Open items:** (1) before college basketball (D4): merge the period-score and box-score steps so each game's summary is fetched once (they fetch it twice today; at college scale that would double ESPN's load); (2) D3 WNBA next (15 teams, same box-score format as the NBA); (3) Phase E redesign (Will's request) once the leagues are loading; (4) rotate the ntfy topic, optional extra healthchecks checks, a UPS, and the baseball stat-name pattern before MLB.
+
+### 2026-10-25 (continued) — Phase D3: WNBA trial on staging found three real problems; fixed and re-proven (live enable awaits Will)
+
+**Trial 1 (all four leagues on a fresh copy of live, WNBA new) FAILED in useful ways and nothing touched live:**
+1. **One missing ESPN page killed the whole box-score step.** WNBA game 401856947 (Sky 58, Lynx 79, 2026-05-29) is a normal finished game for which ESPN's summary endpoint 404s. Box scores ran as ONE step, so that single 404 would have blocked box scores for every game in every league, every night, once WNBA (or college basketball, with many small-school games lacking data) was on live.
+2. **Zero WNBA period scores** (0 of 369): the period query JOINs `sport_period_labels`, which had rows only for the original four leagues. I had listed the WNBA/CFB/MLB rows as a to-do during D1 and never added them.
+3. **ESPN 404s can be transient:** the Phoenix Suns roster 404'd once and returned 17 players seconds later. So a single 404 proves nothing, and "mark the game unavailable on a 404" would be wrong.
+
+**Fixes (all tested; 118 tests):**
+- `http_client`: 404 is now retried like 429/5xx; `FetchError.status_code` carries the HTTP status (None for timeouts or non-JSON).
+- `sql/games_summary_unavailable.sql`: `games.summary_unavailable_at`. A game whose summary is still a 404 after retries is flagged and skipped (not asked every night), rechecked after 3 days, unflagged when a summary arrives; `get_games_missing_periods/box_scores` and the weekly refresh honor it.
+- `api_pulls`: `fetch_game_summary()` (404 after retries gives None and flags; other errors propagate), and `pull_game_periods`/`pull_box_scores` now run per game through `report.each` (one bad game among many is one warning; the rest proceed). Both sides of a game still share one request.
+- `sql/sport_period_labels_new_leagues.sql`: WNBA Quarter 4, CFB Quarter 4, MLB Inning 9.
+- Sanity checks: flagged games are excluded from "box scores present"; new `summary gaps` check (more than 5% of a league's finals flagged, at least 10 games). Gate: flagged sides reported separately and excluded from coverage; more than 5% flagged is a REVIEW. 20 new tests (`tests/test_api_pulls.py` and additions).
+
+**Re-trial on a fresh copy of live (migrations applied BEFORE the new code, as on live):**
+- Run 1 (first load): exit 0, 387 s, 1,186 API calls, 39 steps OK, **0 errors, 0 warnings, 0 sanity problems**; WNBA 15 teams, 221 players, 368 period scores filled, 736 box-score sides (368 games x 2); **2 games ESPN has no summary for were flagged and skipped** (401856947 on 2026-05-29 and 401856954 on 2026-06-01) instead of stopping the step.
+- Run 2: 150 s, 448 calls, **zero summary requests** (flagged games not asked again), data identical before and after (142 teams, 5,417 players, 3,402 games, 430,479 stat rows).
+- **Gate: all 8 checks PASS for WNBA, NBA, NFL and NHL (32 of 32)**; WNBA 729 of 729 tracked sides have a box score, 367 of 367 finals add up, 4 sides excluded as flagged.
+- Dashboard on this data as `dashboard_ro`: 24 pages, 0 exceptions, slowest 0.5 s; dropdowns identical to live (Colts 98, Red Wings 42, Pacers 20, Purdue 16).
+
+**Other lessons:**
+- A trial must blank, not unset, `NTFY_TOPIC` and `HEALTHCHECK_URL` when the pipeline runs from the real project folder: `load_dotenv()` puts unset variables back from `.env` and a trial could page the phone. (Earlier trials ran from a throwaway folder with no `.env`, which hid this.) Same trap as the dashboard's `DASHBOARD_DB_*`.
+- One SSH attempt timed out (transient; homelab's uptime showed no reboot, Tailscale and the public site were fine). Re-ran the step; nothing had started.
+- The first trial's "the 404 stopped everything" would NOT have been visible in a four-team run: scale and new leagues are what expose a missing page, which is why every league goes through staging first.
+
+**Live deployment order for D3 (needs Will's approval): fresh backup; apply BOTH migrations on live first (the new code queries `summary_unavailable_at`); push and pull (this also changes the existing nightly run: per-game isolation and the 404 retries apply to NBA/NFL/NHL too); add WNBA to `LEAGUES_ALL`; first load by hand in the background (about 6.5 min); gate WNBA on live; test the 24 dashboard pages; second run; keep only if everything passes (rollback = remove WNBA from `LEAGUES_ALL`).**

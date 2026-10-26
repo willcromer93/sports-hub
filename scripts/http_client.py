@@ -8,9 +8,12 @@ on the first hiccup. fetch_json() fixes all three:
   - timeouts: 5 s to connect, 30 s to wait for a reply
   - retries: up to 3 more tries, waiting 1 s, 2 s, 4 s between them, but only
     for problems that are usually temporary (timeouts, dropped connections,
-    HTTP 429 "slow down" and 5xx server errors). A 404 is not retried.
-  - clear errors: after the last try it raises FetchError naming the URL,
-    instead of a confusing KeyError three lines later
+    HTTP 429 "slow down", 5xx server errors, and 404: ESPN has been seen
+    answering 404 for a valid URL that works seconds later, so one 404 proves
+    nothing; a page that is really missing just costs a few extra seconds)
+  - clear errors: after the last try it raises FetchError naming the URL (and
+    carrying the HTTP status code, if there was one) instead of a confusing
+    KeyError three lines later
   - a short pause between calls, to be polite to free public APIs
 """
 
@@ -26,11 +29,15 @@ RETRIES = 3  # extra attempts after the first one
 BACKOFF = 1.0  # wait BACKOFF * 2**(n-1) seconds before retry n: 1, 2, 4
 PAUSE_BETWEEN_CALLS = 0.2  # minimum gap between two calls
 
-RETRY_STATUSES = (429, 500, 502, 503, 504)
+RETRY_STATUSES = (404, 429, 500, 502, 503, 504)
 
 
 class FetchError(Exception):
-    """An API call still failed after retries (or returned something unusable)."""
+    """An API call still failed after retries (or returned something unusable).
+    status_code is the HTTP status of the last reply (e.g. 404), or None if there
+    was no reply at all (timeout, dropped connection) or it wasn't valid JSON."""
+
+    status_code = None
 
 
 _session = None
@@ -76,4 +83,6 @@ def fetch_json(url, params=None, headers=None):
     except (requests.RequestException, ValueError) as exc:
         # RequestException covers timeouts, connection errors and HTTP errors;
         # ValueError covers a reply that isn't valid JSON.
-        raise FetchError(f"GET {url} failed: {exc}") from exc
+        error = FetchError(f"GET {url} failed: {exc}")
+        error.status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        raise error from exc
