@@ -6,6 +6,7 @@ A data pipeline and dashboard for four Indiana-area sports teams (Pacers, Purdue
 
 **Production runs 24/7 on a home lab server** (HP ProDesk 600 G4, Ubuntu Server 26.04 LTS, 8 GB RAM, NVMe), independent of any laptop. It replaced the original Raspberry Pi 4 on 2026-10-19:
 - PostgreSQL 18 lives on the server
+- **Every team in the NBA, NFL and NHL (94 teams) is collected nightly** (since 2026-10-25, `LEAGUES_ALL=NBA,NFL,NHL` in the server's `.env`) in addition to the four featured teams: rosters, schedules, scores, period scores, full box scores, roster departures and season/career totals. The first load took about 8 minutes; a normal night takes about 2.5 minutes. The dashboard still shows only the four featured teams until Phase E. The other leagues (WNBA, college basketball, college football, MLB) are next, one at a time
 - `scripts/api_pulls.py` runs automatically every night at 4:00 AM via `cron`, and
   `scripts/refresh_stats.py` every Sunday at 5:00 AM
 - The Streamlit dashboard runs as a systemd service (`sports-hub-dashboard`) on port 8501
@@ -425,7 +426,8 @@ The dashboard is public (Tailscale Funnel, no login), so it is set up to do as l
 - [x] Build the Streamlit dashboard (first version)
 - [x] Make the dashboard publicly reachable (Tailscale Funnel, free; no custom domain)
 - [x] Phase D1: league registry, automatic team discovery, `is_featured`, per-team failure tolerance (no new leagues; output proven identical)
-- [ ] Phase D2-D6: collect every team: NBA/NFL/NHL, then WNBA, college basketball, college football (FBS), MLB (needs a new box-score parser)
+- [x] Phase D2: every NBA, NFL and NHL team collected (trial on staging, 24 of 24 gate checks, then enabled on the server 2026-10-25)
+- [ ] Phase D3-D6: WNBA, college basketball, college football (FBS), MLB (needs a new box-score parser)
 - [ ] Phase E: dashboard league and team pickers for hundreds of teams
 - [ ] Cloudflare Tunnel + own domain, if a nicer URL or login-protected access is ever wanted
 
