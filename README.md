@@ -1,12 +1,12 @@
 # Sports Hub
 
-A data pipeline and dashboard for four Indiana-area sports teams (Pacers, Purdue, Red Wings, Colts). It pulls team, player, schedule and box-score data from sports APIs into PostgreSQL and shows it in a Streamlit dashboard.
+A data pipeline and dashboard for sports data. It started with four Indiana-area teams (Pacers, Purdue, Red Wings, Colts, the "featured" teams the dashboard is built around) and is growing to every team in seven leagues (NFL, NHL, NBA, WNBA, MLB, college basketball, college football). It pulls team, player, schedule and box-score data from ESPN into PostgreSQL and shows it in a Streamlit dashboard. Four leagues are collected today (see "Current Status").
 
 ## Current Status
 
 **Production runs 24/7 on a home lab server** (HP ProDesk 600 G4, Ubuntu Server 26.04 LTS, 8 GB RAM, NVMe), independent of any laptop. It replaced the original Raspberry Pi 4 on 2026-10-19:
 - PostgreSQL 18 lives on the server
-- **Every team in the NBA, NFL, NHL and WNBA (109 teams) is collected nightly** (`LEAGUES_ALL=NBA,NFL,NHL,WNBA` in the server's `.env`; NBA, NFL and NHL since 2026-10-25, WNBA the same night) in addition to the four featured teams: rosters, schedules, scores, period scores, full box scores, roster departures and season/career totals. A normal night takes about 3 minutes (the first load of a league takes 6 to 8). The dashboard still shows only the four featured teams until Phase E. College basketball, college football and MLB are next, one at a time
+- **Every team in the NBA, NFL, NHL and WNBA (109 teams) is collected nightly** (`LEAGUES_ALL=NBA,NFL,NHL,WNBA` in the server's `.env`; NBA, NFL and NHL since 2026-10-25, WNBA the same night) in addition to the four featured teams: rosters, schedules, scores, period scores, full box scores (with per-player details such as starters and jersey numbers), attendance, officials, roster departures and season/career totals. A normal night takes about 3 minutes (the first load of a league takes 6 to 8). The dashboard still shows only the four featured teams until Phase E. College basketball, college football and MLB are next, one at a time
 - `scripts/api_pulls.py` runs automatically every night at 4:00 AM via `cron`, and
   `scripts/refresh_stats.py` every Sunday at 5:00 AM
 - The Streamlit dashboard runs as a systemd service (`sports-hub-dashboard`) on port 8501
@@ -31,9 +31,9 @@ SPORTS-HUB/
 │ └── views/ # One file per page: overview, team, game (Game Center), preview, opponents, player
 ├── .streamlit/config.toml # Dashboard theme (colors, font)
 ├── scripts/
-│ ├── api_pulls.py # Nightly: pulls teams, rosters, schedules, period scores, and box scores into Postgres
+│ ├── api_pulls.py # Nightly: pulls teams, rosters, schedules, then each game's summary (periods, box scores, details) into Postgres
 │ ├── refresh_stats.py # Weekly: re-checks recent games for ESPN stat corrections, rewrites only what changed
-│ ├── espn.py # Shared ESPN game-summary helpers (fetch, parse line scores + box scores); no DB access
+│ ├── espn.py # Shared ESPN game-summary helpers (fetch, parse line scores, box scores, player details, attendance, officials); no DB access
 │ ├── db.py # Database connections (read-write + read-only for the dashboard) + insert/read functions
 │ ├── http_client.py # fetch_json(): every API call goes through it (timeouts, retries, clear errors)
 │ ├── log_setup.py # Logging setup: timestamped, rotating files in logs/
@@ -58,6 +58,7 @@ SPORTS-HUB/
 │ ├── players_roster_tracking.sql # Adds last_seen_at / departed_at to players (roster departure tracking)
 │ ├── teams_is_featured.sql # Adds teams.is_featured: the four dashboard teams, separate from is_tracked
 │ ├── games_summary_unavailable.sql # Adds games.summary_unavailable_at: finished games ESPN has no summary page for
+│ ├── game_summary_details.sql # Per-player game details, attendance, officials, parser version, summary cache, and (still empty) play-by-play tables
 │ ├── sport_period_labels_new_leagues.sql # Period labels for WNBA, CFB and MLB (a league without one gets NO period scores)
 │ └── dashboard_ro_role.sql # Creates the SELECT-only dashboard_ro Postgres role used by the public dashboard
 ├── tests/ # Unit tests (run: venv/bin/python -m unittest discover -s tests)
@@ -65,7 +66,7 @@ SPORTS-HUB/
 ├── venv/ # Python virtual environment (not tracked in git)
 ├── .env # API keys + DB credentials + backup settings (not tracked in git)
 ├── .env.example # The same variable names with placeholder values; safe to commit
-├── Schema.md # Current database schema documentation (9 tables)
+├── Schema.md # Current database schema documentation (13 tables)
 ├── CLAUDE_PROJECT_NOTES.md # Dated running log of project progress/decisions
 └── .gitignore
 
@@ -149,8 +150,8 @@ Pulls team, player and game data and loads it into Postgres. **Safe to rerun any
 2. For each league (in registry order, which keeps database ids stable), makes sure every collected team has a row in `teams`: featured teams are refreshed from ESPN's team detail page (name, venue, city; the config's venue is used only when ESPN has none), and in a fully collected league every team ESPN lists is found by `team_discovery.discover_teams()` and upserted by `(league, espn_id)`. `founded_year` is recorded for the featured teams only, since no API provides it.
 3. Pulls each team's full roster from ESPN's roster endpoint (`site.api.espn.com/apis/site/v2/sports/{sport}/{league}/teams/{espn_id}/roster`; flat or grouped by position, detected automatically) and upserts into `players`, including physical stats, birth info, college, contract summary, injury status and headshot URL, then marks departed players (see "Roster departures").
 4. Pulls each team's preseason, regular-season, and postseason schedules from ESPN (`.../teams/{espn_id}/schedule?seasontype=1|2|3`) and upserts every game into `games`. Each opponent not already known is upserted into `teams` first (untracked) so the game's home/away team IDs have a row to point at. Reruns refresh status, scores, and schedule changes in place.
-5. For every final game that doesn't have per-period scores yet, calls ESPN's `summary?event={id}` endpoint and fills in `game_periods` (regulation, overtime, and shootout rows). Only new finals are requested, so most nights this is a handful of calls.
-6. For every final game that doesn't have a box score yet, uses the same `summary` endpoint to fill in `player_game_appearances` (did play, seconds played) and `player_game_stats` (one row per stat) for **both teams' players** — ours and the opponent's, each side filled in separately if missing.
+5. **Game summaries, fetched once per game.** Every final game that is missing period scores or a box-score side has ESPN's `summary?event={id}` page fetched ONCE, and everything is read from that one page: `game_periods` (regulation, overtime and shootout rows), `player_game_appearances` and `player_game_stats` for **both teams' players** (ours and the opponent's, each side filled in only if missing), the per-player details (starter, ejected, DNP reason, NHL active/scratched, jersey, position), `games.attendance` and `game_officials`. A trimmed copy of the page (boxscore, gameInfo, header) is kept in `game_summary_cache` for 14 days so a parser change can be re-run without asking ESPN again. Only new finals are requested, so most nights this is a handful of calls.
+6. **Parser version and backfill.** Each processed game records `games.summary_parsed_version`. When the parser learns to read something new, `SUMMARY_PARSER_VERSION` in `scripts/espn.py` is bumped and every final game parsed by an older version is re-fetched, 400 per night (`BACKFILL_PER_RUN`, newest first), rewriting its box score with the new fields. Existing games therefore backfill themselves over a few nights, and no migration is needed. ESPN may have corrected a stat since the original load (seen: NFL `passing.adjQBR`), so a backfill can legitimately change a stored number.
 7. Rebuilds `player_season_stats` and `player_career_stats` from `player_game_stats` (additive stats only — see `Schema.md`).
 8. Closes the database connection.
 
@@ -372,7 +373,7 @@ Three layers, so a problem reaches your phone whether a job *fails* or *never ru
 
 **Roster departures.** Each nightly roster pull marks players who were on a team's roster but are missing tonight as departed (`players.departed_at`), instead of leaving them looking current forever. Rows are never deleted. A safety rule (`roster_tracking.py`) refuses to record anything when ESPN returns an empty roster or one under 50% of the previous size, and raises a warning, so a bad response can't wipe a roster. A real mass cutdown (about 90 to 53 players) goes through, with an informational alert if more than 25% leave at once. A player who reappears is automatically marked back on the roster. A player known only from a box score (never on a roster pull) is neither on the roster nor "departed". The dashboard treats a player as "on the roster" only if `last_seen_at IS NOT NULL AND departed_at IS NULL`.
 
-**Games ESPN has no summary for.** Box scores and period scores both come from ESPN's per-game summary page, and a few finished games simply have none (two WNBA games so far). Each game is its own unit (`report.each`), so one bad game never blocks the rest. A game whose summary is still a 404 after the retries is flagged (`games.summary_unavailable_at`) and skipped, so it isn't requested every night; it is rechecked after 3 days in case ESPN publishes it late, and the flag clears when a summary arrives. Flagged games are known gaps for the sanity checks and the league gate, and a league where more than 5% of the finals are flagged (at least 10 games) raises a warning.
+**Games ESPN has no summary for.** Box scores, period scores and the game details all come from ESPN's per-game summary page, and a few finished games simply have none (two WNBA games so far). Each game is its own unit (`report.each`), so one bad game never blocks the rest. A game whose summary is still a 404 after the retries is flagged (`games.summary_unavailable_at`) and skipped, so it isn't requested every night; it is rechecked after 3 days in case ESPN publishes it late, and the flag clears when a summary arrives. Flagged games are known gaps for the sanity checks and the league gate, and a league where more than 5% of the finals are flagged (at least 10 games) raises a warning.
 
 **Sanity checks** run at the end of every nightly run (`sanity_checks.py`) and look at the finished data, not at the steps: exactly the expected number of tracked teams with no duplicates; every game involves a tracked team; every final game has both scores; per-period scores add up to the final score (judged by how new and how common a mismatch is, since ESPN's own data is occasionally inconsistent: a mismatch on a game from the last 3 days alerts, an older one stays quiet, and more than 2% of a league's finals mismatching alerts as systemic); final games older than 36 h have a box score; the schedule pull touched at least one game during this run; and no append-only table has fewer rows than after the previous run. A failure becomes a warning (phone alert) and does not fail the run. Known upstream errors that can't be fixed (e.g. an ESPN line score that contradicts its own final score; the 3 found so far were all an NHL home team's line score one goal short) go in `ACKNOWLEDGED_PERIOD_MISMATCHES` with the reason; the check logs a note if ESPN later fixes one so the entry can be removed.
 
@@ -432,6 +433,8 @@ The dashboard is public (Tailscale Funnel, no login), so it is set up to do as l
 - [x] Phase D1: league registry, automatic team discovery, `is_featured`, per-team failure tolerance (no new leagues; output proven identical)
 - [x] Phase D2: every NBA, NFL and NHL team collected (trial on staging, 24 of 24 gate checks, then enabled on the server 2026-10-25)
 - [x] Phase D3: WNBA collected (the trial found and fixed three bugs: one missing ESPN page stopping all box scores, no WNBA period labels, transient 404s; enabled on the server 2026-10-25)
+- [x] Fetch each game summary once (was twice) and keep attendance, officials and per-player details; parser-version backfill (D4 prerequisite; A/B on a database copy: identical periods, box scores and players)
+- [ ] Play-by-play parser (the `game_plays` tables exist but are empty)
 - [ ] Phase D4-D6: college basketball, college football (FBS), MLB (needs a new box-score parser)
 - [ ] Phase E: dashboard league and team pickers for hundreds of teams
 - [ ] Cloudflare Tunnel + own domain, if a nicer URL or login-protected access is ever wanted

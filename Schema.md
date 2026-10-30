@@ -9,7 +9,7 @@ The Pi was brought up to date the same day and its 93 columns match the Mac's ex
 
 ## Tables
 
-9 tables. Build order on a fresh database:
+13 tables (9 core + 4 added by `sql/game_summary_details.sql`). Build order on a fresh database:
 
 1. Phase 1 — `teams`, `players`, `player_game_appearances`, `player_game_stats`,
    `player_season_stats`, `player_career_stats`
@@ -24,6 +24,10 @@ The Pi was brought up to date the same day and its 93 columns match the Mac's ex
    (integer). Safe to rerun.
 6. `sql/appearances_team_id.sql`: adds `team_id` to `player_game_appearances`
    (which side the player was on) and backfills it. Safe to rerun.
+7. `sql/game_summary_details.sql`: per-player game details, `games.attendance` and
+   `games.summary_parsed_version`, and the tables `game_officials`, `game_summary_cache`,
+   `game_plays`, `game_play_participants` (see "Game summary details" below). Safe to rerun.
+   Apply it on a database BEFORE deploying the code that uses it.
 
 ### teams
 One row per team: every team collected in full (tracked), including the four
@@ -132,6 +136,8 @@ announced yet (common for Purdue) — there's no column to flag that yet.
 | venue_name      | TEXT        |                                                            |
 | is_neutral_site | BOOLEAN     | default false                                              |
 | last_updated    | TIMESTAMPTZ | defaults to now()                                          |
+| attendance      | INTEGER     | announced attendance from the summary's gameInfo; NULL when ESPN sends none or 0 |
+| summary_parsed_version | SMALLINT | which `SUMMARY_PARSER_VERSION` last processed this game's summary; NULL = never (loaded before the details existed). Games below the current version are re-fetched, 400 a night |
 | summary_unavailable_at | TIMESTAMPTZ | NULL for normal games; set when ESPN's summary page for this finished game was still a 404 after retries (so it has no box score or period scores). The pipeline stops asking, rechecks after 3 days, and clears it when a summary arrives. Added by `sql/games_summary_unavailable.sql` |
 
 Unique on (league, external_id). Check: `home_team_id <> away_team_id`.
@@ -208,6 +214,13 @@ snaps) aren't in ESPN's box score, so they have no row.
 | team_id        | INTEGER FK | references teams; NOT NULL — the team the player was on **in this game** (ours or the opponent). Use this, not `players.team_id` (current team only), to split a game's two sides |
 | did_play       | BOOLEAN    |                    |
 | seconds_played | INTEGER    | see below          |
+| is_starter     | BOOLEAN    | basketball only: started the game. NULL = ESPN does not send it for this sport (not false) |
+| was_ejected    | BOOLEAN    | basketball only |
+| dnp_reason     | TEXT       | why a player did not play (e.g. COACH'S DECISION); set only when `did_play` is false |
+| is_active      | BOOLEAN    | NHL only: ESPN's `active` flag |
+| was_scratched  | BOOLEAN    | NHL only: healthy scratch / did not dress |
+| jersey         | TEXT       | number worn in THAT game (text: '00' and '0' both exist) |
+| position       | TEXT       | position abbreviation in that game; NULL for the NFL (its box score has none) |
 
 Unique on (game_id, player_id). Index on (team_id, game_id). `team_id` added
 by `sql/appearances_team_id.sql`. `player_game_stats` has no team column of
@@ -218,6 +231,15 @@ NBA/NCAAB store whole minutes × 60, NHL stores exact seconds (from MM:SS
 time on ice), NFL leaves this NULL (ESPN's box score has no playing time or
 snap counts). Converting to a
 display format like MM:SS happens in the Python/dashboard layer, not here.
+
+### Game summary details (new tables)
+All filled from the same one-per-game summary fetch (see `scripts/api_pulls.py`).
+
+- **game_officials**: `official_id` SERIAL PK, `game_id` FK (cascade), `official_name`, `role` (referee, linesman, ...), `sort_order`. Unique on (game_id, official_name, role); NHL gives every official order 0, so `sort_order` is not part of the key.
+- **game_summary_cache**: `game_id` PK/FK (cascade), `fetched_at`, `payload` JSONB, a trimmed copy of the summary (boxscore, gameInfo, header; about 60 to 100 KB, not the 500 KB page). Rows older than 14 days are deleted by each run. It exists so a parser change can be re-run without asking ESPN again.
+- **game_plays** and **game_play_participants**: play-by-play (shot locations, hockey event types, substitutions, football down and distance). The tables exist but **nothing fills them yet**; the plays parser is a later step (it will bump `SUMMARY_PARSER_VERSION`).
+
+The read-only `dashboard_ro` role is granted SELECT on all four by the migration.
 
 ### player_game_stats
 One row per player, per game, per stat — long format rather than wide
@@ -319,7 +341,7 @@ data collection started (2026) — not a player's full professional career.
 - `teams.capacity` intentionally unpopulated.
 - `games.game_time` can't tell "time TBD" apart from a real start time.
 - `game_periods` and box scores are written once per game by the nightly
-  pull, then re-checked weekly by `refresh_stats.py` for 14 days after the
+  pull (from a single summary fetch), then re-checked weekly by `refresh_stats.py` for 14 days after the
   game. A correction ESPN makes after that window isn't picked up.
 - The rollups cover our tracked teams' players only. Opponents' box scores
   are stored, but the dashboard aggregates them from `player_game_stats`
