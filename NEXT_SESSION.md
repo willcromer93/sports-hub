@@ -1,6 +1,6 @@
 # Start here: handoff for a new Claude session
 
-*Last updated 2026-10-25, late evening. Read this file first, then only the LAST 2-3 entries of
+*Last updated 2026-10-29, evening. Read this file first, then only the LAST 2-3 entries of
 `CLAUDE_PROJECT_NOTES.md` (it is a long dated log; do not read it top to bottom).*
 
 ## What this project is
@@ -18,7 +18,8 @@ reached over Tailscale. The Raspberry Pi it replaced was retired 2026-10-19.
 | D1 engine (league registry, automatic team discovery, `teams.is_featured`, per-team failure tolerance) | **done and live** |
 | D2 NBA + NFL + NHL, every team | **live** since 2026-10-25 |
 | D3 WNBA, every team | **live** since 2026-10-25 |
-| D4 college basketball (362 teams) | next; prerequisite below |
+| One summary fetch per game + attendance, officials, per-player details, parser-version backfill (D4 prerequisite) | **live** since 2026-10-29 (A/B proven; backfill finishes in about 3 nights) |
+| D4 college basketball (362 teams) | next; remaining prerequisites below |
 | D5 college football (FBS, 138 teams), D6 MLB (needs a new box-score parser) | after D4 |
 | Phase E: **full redesign of the website and its tabs** (Will's request: look AND navigation, for ~640 teams) | after the leagues are loading; design first, then build |
 
@@ -32,14 +33,16 @@ On the Mac the SSH alias `homelab` reaches the server (`ssh homelab`; check `hos
 - `crontab -l` shows the nightly pipeline (04:00), weekly refresh (Sunday 05:00), backup (03:30), restore test (Sunday 06:00).
 - The public site `https://sportshub.taildca027.ts.net` returns 200; the healthchecks.io check is green.
 
-## Next task: D4 preparation, then college basketball
+## Next task: finish D4 preparation, then college basketball
 
-1. **Merge the period-score and box-score steps** in `scripts/api_pulls.py` so each finished game's ESPN summary is
-   fetched ONCE (today both steps fetch the same page: 1,186 calls for 368 WNBA games on a first load). At college
-   scale that doubles ESPN's load. Prove the data is identical with an A/B on a database copy (compare ignoring
-   auto-numbered ids, since processing order may change them).
-2. Decide the `summary gaps` threshold for college (small-school games often have no ESPN summary at all; the check
+Done 2026-10-29: each finished game's ESPN summary is now fetched ONCE (`pull_game_summaries` in `scripts/api_pulls.py`), with
+attendance, officials, per-player details and a 14-day summary cache; games parsed by an older `SUMMARY_PARSER_VERSION` are
+re-processed 400 a night. Check tomorrow's `logs/last_pipeline.json`: "games re-parsed (backfill)" should be 400, then about 127, then 0.
+
+1. Decide the `summary gaps` threshold for college (small-school games often have no ESPN summary at all; the check
    currently warns above 5% of a league's finals), add weekly college roster refresh and season-aware schedule fetching.
+2. Optional before college: the **play-by-play parser** (tables `game_plays` / `game_play_participants` exist but are empty;
+   bump `SUMMARY_PARSER_VERSION` when it lands). Size the row count first: roughly 400 to 500 plays per game times thousands of games.
 3. Then follow the league procedure below for `NCAAB`.
 
 ## The procedure for enabling any league (proven three times; do not skip steps)
@@ -87,5 +90,5 @@ integration, re-subscribe phone and Mac. Optional: extra healthchecks.io checks 
 ## Key files
 
 `scripts/api_pulls.py` (nightly pipeline) · `leagues.py` (registry) · `team_discovery.py` · `league_gate.py` · `sanity_checks.py` ·
-`run_report.py` · `http_client.py` · `db.py` · `sql/` (migrations) · `tests/` (run: `venv/bin/python -m unittest discover -s tests`, 118 tests) ·
+`run_report.py` · `http_client.py` · `db.py` · `sql/` (migrations) · `tests/` (run: `venv/bin/python -m unittest discover -s tests`, 132 tests) ·
 `README.md` (full operating manual) · `Schema.md` · `CLAUDE_PROJECT_NOTES.md` (dated log).
