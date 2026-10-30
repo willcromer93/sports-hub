@@ -2,6 +2,7 @@ import os
 
 import psycopg2
 from dotenv import load_dotenv
+from psycopg2.extras import Json
 
 load_dotenv()
 
@@ -361,33 +362,58 @@ def insert_game(
     return game_id
 
 
-def get_games_missing_periods(conn):
+def get_games_needing_summary(conn, parser_version, backfill_limit):
     """
-    Find final games that don't have any game_periods rows yet, so the
-    per-period pull only requests games it hasn't already filled in.
-    Returns a list of (game_id, league, external_id, regulation_periods) tuples.
+    Final games whose ESPN summary has to be fetched: the ones missing period
+    scores or a side of the box score, plus up to `backfill_limit` games last
+    parsed by an older parser version (the backfill, newest games first, so a new
+    parser addition spreads over several nights instead of one huge run).
+    Games flagged as having no summary are left out for 3 days.
+    Returns (game_id, league, external_id, regulation_periods, needs_periods,
+    sides, is_backfill) tuples, where sides is [(team_id, espn_id, needs_box), ...]
+    for both teams: each side is checked on its own, so a game where only one
+    side was stored gets just the missing side filled in.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT g.game_id, g.league, g.external_id, l.regulation_periods
+            SELECT g.game_id, g.league, g.external_id, l.regulation_periods,
+                   NOT EXISTS (SELECT 1 FROM game_periods p WHERE p.game_id = g.game_id),
+                   home.team_id, home.espn_id,
+                   NOT EXISTS (SELECT 1 FROM player_game_appearances a
+                               WHERE a.game_id = g.game_id AND a.team_id = home.team_id),
+                   away.team_id, away.espn_id,
+                   NOT EXISTS (SELECT 1 FROM player_game_appearances a
+                               WHERE a.game_id = g.game_id AND a.team_id = away.team_id),
+                   (g.summary_parsed_version IS NULL OR g.summary_parsed_version < %s)
             FROM games g
             JOIN sport_period_labels l ON l.league = g.league
+            JOIN teams home ON home.team_id = g.home_team_id
+            JOIN teams away ON away.team_id = g.away_team_id
             WHERE g.status = 'final'
-              AND NOT EXISTS (
-                  SELECT 1 FROM game_periods p WHERE p.game_id = g.game_id
-              )
               AND (g.summary_unavailable_at IS NULL
                    OR g.summary_unavailable_at < now() - interval '3 days')
             ORDER BY g.game_time;
-            """
+            """,
+            (parser_version,),
         )
-        return cur.fetchall()
+        rows = cur.fetchall()
+
+    missing, backfill = [], []
+    for (game_id, league, external_id, regulation_periods, needs_periods,
+         home_id, home_espn, home_needs, away_id, away_espn, away_needs, outdated) in rows:
+        sides = [(home_id, home_espn, home_needs), (away_id, away_espn, away_needs)]
+        game = (game_id, league, external_id, regulation_periods, needs_periods, sides)
+        if needs_periods or home_needs or away_needs:
+            missing.append(game + (False,))
+        elif outdated:
+            backfill.append(game + (True,))
+    return missing + backfill[::-1][:backfill_limit]  # backfill: newest first
 
 
 def mark_summary_unavailable(conn, game_id):
     """Remember that ESPN has no summary for this finished game (still a 404 after
-    retries), so the pipeline stops asking every night. get_games_missing_* rechecks
+    retries), so the pipeline stops asking every night. get_games_needing_summary rechecks
     it after 3 days."""
     with conn.cursor() as cur:
         cur.execute(
@@ -443,34 +469,6 @@ def insert_game_periods(conn, game_id, periods, replace=False):
     conn.commit()
 
 
-def get_games_missing_box_scores(conn):
-    """
-    Find each side of a final game that doesn't have a box score yet — both
-    our team and the opponent, checked separately, so a game where only one
-    side was stored (e.g. games loaded before opponents were kept) gets just
-    the missing side filled in.
-    Returns a list of (game_id, league, external_id, team_id, espn_id) tuples,
-    one per missing side.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT g.game_id, g.league, g.external_id, t.team_id, t.espn_id
-            FROM games g
-            JOIN teams t ON t.team_id IN (g.home_team_id, g.away_team_id)
-            WHERE g.status = 'final'
-              AND NOT EXISTS (
-                  SELECT 1 FROM player_game_appearances a
-                  WHERE a.game_id = g.game_id AND a.team_id = t.team_id
-              )
-              AND (g.summary_unavailable_at IS NULL
-                   OR g.summary_unavailable_at < now() - interval '3 days')
-            ORDER BY g.game_time, t.is_tracked DESC;
-            """
-        )
-        return cur.fetchall()
-
-
 def upsert_box_score_player(conn, team_id, league, external_id, name):
     """
     Return the player_id for a player found in a box score, adding a minimal
@@ -507,7 +505,13 @@ def box_score_rows(conn, team_id, league, parsed):
             conn, team_id, league, espn_athlete_id, player["name"]
         )
         rows.append(
-            (player_id, player["did_play"], player["seconds_played"], player["stats"])
+            (
+                player_id,
+                player["did_play"],
+                player["seconds_played"],
+                player["stats"],
+                player["details"],
+            )
         )
     return rows
 
@@ -516,8 +520,9 @@ def insert_box_score(conn, game_id, team_id, box_score, replace=False):
     """
     Insert one team's side of a game's box score into player_game_appearances
     and player_game_stats. `box_score` is a list of
-    (player_id, did_play, seconds_played, stats), where stats is a dict of
-    {stat_name: stat_value}. Upserts both tables. With replace=True, that
+    (player_id, did_play, seconds_played, stats, details), where stats is a dict of
+    {stat_name: stat_value} and details is espn.parse_player_details' dict of the
+    per-game columns (starter, jersey, ...). Upserts both tables. With replace=True, that
     team's existing rows for the game are deleted first (the other team's
     side is left alone), so a stat or player ESPN has since removed doesn't
     linger. Commits once at the end, so a side gets either its whole box
@@ -545,20 +550,34 @@ def insert_box_score(conn, game_id, team_id, box_score, replace=False):
                 """,
                 (game_id, team_id),
             )
-        for player_id, did_play, seconds_played, stats in box_score:
+        for player_id, did_play, seconds_played, stats, details in box_score:
             cur.execute(
                 """
                 INSERT INTO player_game_appearances (
-                    game_id, player_id, team_id, did_play, seconds_played
+                    game_id, player_id, team_id, did_play, seconds_played,
+                    is_starter, was_ejected, dnp_reason, is_active, was_scratched,
+                    jersey, position
                 )
-                VALUES (%s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (game_id, player_id)
                 DO UPDATE SET
                     team_id = EXCLUDED.team_id,
                     did_play = EXCLUDED.did_play,
-                    seconds_played = EXCLUDED.seconds_played;
+                    seconds_played = EXCLUDED.seconds_played,
+                    is_starter = EXCLUDED.is_starter,
+                    was_ejected = EXCLUDED.was_ejected,
+                    dnp_reason = EXCLUDED.dnp_reason,
+                    is_active = EXCLUDED.is_active,
+                    was_scratched = EXCLUDED.was_scratched,
+                    jersey = EXCLUDED.jersey,
+                    position = EXCLUDED.position;
                 """,
-                (game_id, player_id, team_id, did_play, seconds_played),
+                (
+                    game_id, player_id, team_id, did_play, seconds_played,
+                    details["is_starter"], details["was_ejected"], details["dnp_reason"],
+                    details["is_active"], details["was_scratched"], details["jersey"],
+                    details["position"],
+                ),
             )
             for stat_name, stat_value in stats.items():
                 cur.execute(
@@ -572,6 +591,62 @@ def insert_box_score(conn, game_id, team_id, box_score, replace=False):
                     """,
                     (game_id, player_id, stat_name, stat_value),
                 )
+    conn.commit()
+
+
+def save_game_info(conn, game_id, attendance, officials):
+    """Store a game's attendance and officials (espn.parse_game_info). Officials are
+    upserted, so re-processing a game adds nothing twice. Commits once."""
+    with conn.cursor() as cur:
+        cur.execute("UPDATE games SET attendance = %s WHERE game_id = %s;", (attendance, game_id))
+        for name, role, sort_order in officials:
+            cur.execute(
+                """
+                INSERT INTO game_officials (game_id, official_name, role, sort_order)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT ON CONSTRAINT game_officials_unique
+                DO UPDATE SET sort_order = EXCLUDED.sort_order;
+                """,
+                (game_id, name, role, sort_order),
+            )
+    conn.commit()
+
+
+def cache_summary(conn, game_id, trimmed_summary):
+    """Keep a trimmed copy of the summary just parsed (espn.trim_summary_for_cache),
+    so a parser change can be re-run without asking ESPN again."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO game_summary_cache (game_id, payload)
+            VALUES (%s, %s)
+            ON CONFLICT (game_id)
+            DO UPDATE SET payload = EXCLUDED.payload, fetched_at = now();
+            """,
+            (game_id, Json(trimmed_summary)),
+        )
+    conn.commit()
+
+
+def prune_summary_cache(conn, days=14):
+    """Delete cached summaries older than `days`. Returns how many were deleted."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM game_summary_cache WHERE fetched_at < now() - make_interval(days => %s);",
+            (days,),
+        )
+        deleted = cur.rowcount
+    conn.commit()
+    return deleted
+
+
+def mark_summary_parsed(conn, game_id, parser_version):
+    """Record which parser version last processed this game's summary."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE games SET summary_parsed_version = %s WHERE game_id = %s;",
+            (parser_version, game_id),
+        )
     conn.commit()
 
 

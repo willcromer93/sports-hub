@@ -88,9 +88,27 @@ def parse_stat_value(raw):
         return None
 
 
+def parse_player_details(entry, athlete):
+    """Per-game facts about one player from a box score entry, as a dict of the
+    player_game_appearances columns. None means ESPN doesn't send that field for this
+    sport (not "false"): starter/ejected/reason come from basketball entries, active/
+    scratched from NHL athletes, and the NFL box score carries no position."""
+    position = athlete.get("position")
+    return {
+        "is_starter": entry.get("starter"),
+        "was_ejected": entry.get("ejected"),
+        # ESPN fills `reason` even for players who played; it only means something for a DNP
+        "dnp_reason": entry.get("reason") if entry.get("didNotPlay") else None,
+        "is_active": athlete.get("active"),
+        "was_scratched": athlete.get("scratched"),
+        "jersey": athlete.get("jersey"),
+        "position": position.get("abbreviation") if isinstance(position, dict) else None,
+    }
+
+
 def parse_box_score(team_box, league):
     """Flatten one team's ESPN box score into
-    {espn_athlete_id: {"name", "did_play", "seconds_played", "stats"}}.
+    {espn_athlete_id: {"name", "did_play", "seconds_played", "stats", "details"}}.
     A player can appear in several stat groups (an NFL running back is under
     both rushing and receiving), so their stats are merged into one entry."""
     players = {}
@@ -106,6 +124,7 @@ def parse_box_score(team_box, league):
                     "did_play": not entry.get("didNotPlay"),
                     "seconds_played": None,
                     "stats": {},
+                    "details": parse_player_details(entry, athlete),
                 },
             )
             for key, raw in zip(group["keys"], entry.get("stats", [])):
@@ -140,3 +159,36 @@ def parse_team_box_score(summary, espn_team_id, league):
     team_boxes = summary.get("boxscore", {}).get("players", [])
     team_box = next((t for t in team_boxes if t["team"]["id"] == espn_team_id), None)
     return parse_box_score(team_box, league) if team_box else {}
+
+
+def parse_game_info(summary):
+    """(attendance, officials) from a summary's gameInfo. Attendance is an int or None
+    (ESPN sends 0 or nothing for some games; 0 is stored as None, not a real crowd).
+    Officials is a list of (name, role, sort_order), in ESPN's order, without repeats."""
+    info = summary.get("gameInfo") or {}
+    attendance = info.get("attendance")
+    attendance = int(attendance) if attendance else None
+    officials, seen = [], set()
+    for official in info.get("officials") or []:
+        name = official.get("displayName") or official.get("fullName")
+        role = (official.get("position") or {}).get("displayName")
+        if not name or not role or (name, role) in seen:
+            continue
+        seen.add((name, role))
+        officials.append((name, role, official.get("order")))
+    return attendance, officials
+
+
+# The parts of a summary worth keeping in game_summary_cache: enough to re-run the
+# parsers above without asking ESPN again, without the plays, video and news that make
+# up most of the 500 KB page.
+# Bump when the parsers above learn to read something new: the pipeline then re-processes
+# every final game last parsed by an older version (games.summary_parsed_version), a few
+# hundred a night, so no migration is needed to fill in old games.
+SUMMARY_PARSER_VERSION = 1
+
+CACHED_SUMMARY_KEYS = ("boxscore", "gameInfo", "header")
+
+
+def trim_summary_for_cache(summary):
+    return {key: summary[key] for key in CACHED_SUMMARY_KEYS if key in summary}
